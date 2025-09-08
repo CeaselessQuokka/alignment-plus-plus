@@ -1,0 +1,47 @@
+{
+	"name": "qdt-alignment-plus-plus",
+	"emitLegacyScripts": true,
+	"tree": {
+		"$className": "DataModel",
+		"ServerStorage": {
+			"$className": "ServerStorage",
+			"AlignmentPlusPlus": {
+				"$className": "Folder",
+				"Assets": {
+					"$className": "Folder",
+					"$path": "src/AlignmentPlusPlus/Assets"
+				},
+				"Modules": {
+					"$className": "Folder",
+					"ComponentExtensions": {
+						"$className": "Folder",
+						"$path": "src/AlignmentPlusPlus/Modules/ComponentExtensions"
+					},
+					"Features": {
+						"$className": "Folder",
+						"$path": "src/AlignmentPlusPlus/Modules/Features"
+					},
+					"Helpers": {
+						"$className": "Folder",
+						"$path": "src/AlignmentPlusPlus/Modules/Helpers"
+					},
+					"Services": {
+						"$className": "Folder",
+						"$path": "src/AlignmentPlusPlus/Modules/Services"
+					},
+					"Ui": {
+						"$className": "Folder",
+						"$path": "src/AlignmentPlusPlus/Modules/Ui"
+					},
+					"Packages": {
+						"$className": "Folder",
+						"$path": "Packages"
+					}
+				},
+				"AlignmentPlusPlus": {
+					"$path": "src/AlignmentPlusPlus/AlignmentPlusPlus.server.luau"
+				}
+			}
+		}
+	}
+}
