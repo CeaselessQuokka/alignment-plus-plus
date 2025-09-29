@@ -40,6 +40,9 @@
 				},
 				"AlignmentPlusPlus": {
 					"$path": "src/AlignmentPlusPlus/AlignmentPlusPlus.server.luau"
+				},
+				"LICENSE": {
+					"$path": "src/AlignmentPlusPlus/LICENSE.server.luau"
 				}
 			}
 		}
