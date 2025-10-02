@@ -161,6 +161,7 @@ function SettingsService.Set(name: SettingName, value: SettingValue)
 
 	self._settings[name] = value
 	self.OnSettingChanged:FireDeferred(name, value)
+	self.Save()
 end
 
 function SettingsService.Toggle(name: SettingName)
@@ -168,6 +169,7 @@ function SettingsService.Toggle(name: SettingName)
 
 	self._settings[name] = not self._settings[name]
 	self.OnSettingChanged:FireDeferred(name, self._settings[name])
+	self.Save()
 end
 
 function SettingsService.Save()
