@@ -1,25 +1,26 @@
 --!strict
---- Services ---
-local Selection = game:GetService("Selection")
-local Workspace = game:GetService("Workspace")
+-- Services --
+const Selection = game:GetService("Selection")
+const Workspace = game:GetService("Workspace")
 
---- Imports ---
-local Trove = require(script.Parent.Modules.Packages.Trove)
+-- Imports --
+const Trove = require(script.Parent.Modules.Packages.Trove)
 
-local SelectionService = require(script.Parent.Modules.Services.SelectionService)
-local SettingsService = require(script.Parent.Modules.Services.SettingsService)
-local WidgetService = require(script.Parent.Modules.Services.WidgetService)
+const InputService = require(script.Parent.Modules.Services.InputService)
+const SelectionService = require(script.Parent.Modules.Services.SelectionService)
+const SettingsService = require(script.Parent.Modules.Services.SettingsService)
+const WidgetService = require(script.Parent.Modules.Services.WidgetService)
 
-local SettingsHandler = require(script.Parent.Modules.Ui.Handlers.SettingsHandler)
+const SettingsHandler = require(script.Parent.Modules.Ui.Handlers.SettingsHandler)
 
---- Variables ---
+-- Variables --
 local TOOLBAR_NAME = "Alignment++"
 if plugin.Name:find("rbxmx") then -- Plugins installed by roblox are rbxm, whereas locally saved plugins are rbxmx (as of at least 9/9/2025).
 	TOOLBAR_NAME = `{TOOLBAR_NAME} (DEV)`
 end
 
-local toolbar = plugin:CreateToolbar(TOOLBAR_NAME)
-local pluginButton = toolbar:CreateButton(
+const toolbar = plugin:CreateToolbar(TOOLBAR_NAME)
+const pluginButton = toolbar:CreateButton(
 	"", -- Button ID
 	"", -- Tooltip
 	"rbxassetid://6230678365", -- Icon
@@ -29,18 +30,24 @@ local pluginButton = toolbar:CreateButton(
 local activated = false
 local transitioningState = false
 local lastSelectedTool: Enum.RibbonTool = Enum.RibbonTool.None
-local unloadTrove = Trove.new()
+const unloadTrove = Trove.new()
 
---- Functions ---
-local function RestoreRibbonTool()
+-- Functions --
+const function RestoreRibbonTool()
 	-- Necessary hack: https://create.roblox.com/docs/reference/engine/classes/Plugin#SelectRibbonTool
-	local lastSelection = Selection:Get()
+	const lastSelection = Selection:Get()
 	Selection:Set({ Workspace })
 	plugin:SelectRibbonTool(lastSelectedTool, UDim2.new(0, 0, 0, 0))
 	Selection:Set(lastSelection)
 end
 
-local function Activate()
+-- Activation follows the widget rather than being tracked alongside it.
+--
+-- Studio can enable or disable a DockWidgetPluginGui on its own, restoring layout at startup or when the user
+-- closes it, and the plugin can be deactivated out from under us when another one takes the mouse. Keeping a
+-- separate flag in step with all of that is what made the panel sometimes need the toolbar button pressed
+-- three times: the flag said it was open while the widget disagreed, so the next press closed it again.
+const function Activate()
 	if activated or transitioningState then
 		return
 	end
@@ -49,13 +56,13 @@ local function Activate()
 	lastSelectedTool = plugin:GetSelectedRibbonTool()
 	pluginButton:SetActive(true)
 	plugin:Activate(true)
-	WidgetService.Show()
+	InputService.Start()
 	SelectionService.Start()
 	activated = true
 	transitioningState = false
 end
 
-local function Deactivate()
+const function Deactivate()
 	if not activated or transitioningState then
 		return
 	end
@@ -63,25 +70,27 @@ local function Deactivate()
 	transitioningState = true
 	pluginButton:SetActive(false)
 	plugin:Activate(false)
-	WidgetService.Hide()
 	SelectionService.Stop()
+	InputService.Stop()
 	activated = false
 	transitioningState = false
 end
 
-local function Unload()
+const function Unload()
 	SettingsService.Unload()
 	SelectionService.Unload()
+	InputService.Unload()
 	WidgetService.Unload()
 	unloadTrove:Destroy()
 	RestoreRibbonTool()
 end
 
---- Alignment++ Plugin ---
+-- Alignment++ Plugin --
 do -- Load services.
 	-- Initialize synchronously.
 	SettingsService.Init(plugin)
 	WidgetService.Init(plugin)
+	InputService.Init()
 	SelectionService.Init(plugin)
 
 	-- Start synchronously.
@@ -104,26 +113,29 @@ do -- Load components.
 	require(script.Parent.Modules.Ui.Components.SelectionUi)
 end
 
-(WidgetService.Widget :: WidgetService.Widget):BindToClose(function()
-	WidgetService.Hide()
-	Deactivate()
-	RestoreRibbonTool()
-end)
-unloadTrove:Add(plugin.Deactivation:Connect(Deactivate))
-plugin.Unloading:Once(Unload)
+const widget = WidgetService.Widget :: WidgetService.Widget
 
-unloadTrove:Add(pluginButton.Click:Connect(function()
-	if activated then
-		plugin:Deactivate()
-		task.defer(RestoreRibbonTool)
-	else
+-- The widget's own enabled state is the single source of truth for whether the plugin is running.
+unloadTrove:Add(widget:GetPropertyChangedSignal("Enabled"):Connect(function()
+	if widget.Enabled then
 		Activate()
+	else
+		Deactivate()
+		RestoreRibbonTool()
 	end
 end))
 
--- Enable and disable widget so it actually loads on first button click.
-task.delay(1, function()
-	WidgetService.Show()
-	task.wait()
+widget:BindToClose(function()
 	WidgetService.Hide()
 end)
+
+-- Losing the mouse to another plugin closes the panel, which then runs the deactivation above.
+unloadTrove:Add(plugin.Deactivation:Connect(function()
+	WidgetService.Hide()
+end))
+plugin.Unloading:Once(Unload)
+
+-- The button only ever toggles the widget; everything else follows from that.
+unloadTrove:Add(pluginButton.Click:Connect(function()
+	WidgetService.SetShown(not widget.Enabled)
+end))

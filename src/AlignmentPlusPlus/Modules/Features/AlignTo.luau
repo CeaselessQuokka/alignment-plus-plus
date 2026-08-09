@@ -1,74 +1,86 @@
 --!strict
---- Imports ---
-local SettingsService = require(script.Parent.Parent.Services.SettingsService)
+-- Imports --
+const SettingsService = require(script.Parent.Parent.Services.SettingsService)
 
-local ModelHelper = require(script.Parent.Parent.Helpers.ModelHelper)
+const GeometryHelper = require(script.Parent.Parent.Helpers.GeometryHelper)
+const ModelHelper = require(script.Parent.Parent.Helpers.ModelHelper)
+const PickHelper = require(script.Parent.Parent.Helpers.PickHelper)
 
---- Functions ---
-local function Align(target: BasePart, translation: Vector3)
-	-- Align selected model (or parent/rootmost model), unless PartOnly is enabled.
-	local model = ModelHelper.GetPartModel(target)
-	if model and not SettingsService.Get("PartOnly") then
-		ModelHelper.TranslateModel(target, model, translation)
-	else
-		if SettingsService.Get("RespectPartPivot") then
-			target:PivotTo(target:GetPivot() + translation)
-		else
-			target.Position += translation
-		end
-	end
+-- Types --
+type Pick = PickHelper.Pick
+
+export type Translations = {
+	AlongNormal: Vector3, -- Slides until the target's selection is flush with the anchor's plane.
+	NearestAxis: Vector3, -- Slides along whichever world axis the target's normal points down.
+}
+
+-- Variables --
+-- Below this the target's selection is edge on to the anchor's plane, so sliding along the normal would either
+-- never reach it or shoot off to somewhere absurd. The gap is simply closed instead.
+const MINIMUM_PLANE_ALIGNMENT = 0.05
+
+-- Functions --
+const function Align(target: Pick, translation: Vector3)
+	ModelHelper.Translate(target.Subject, translation)
 end
 
---- Align To ---
-local AlignTo = {}
-function AlignTo.AttemptAlign(
-	target: BasePart,
-	anchor: BasePart,
-	targetObjectNormal: Vector3,
-	anchorObjectNormal: Vector3,
-	targetAlignmentCFrame: CFrame?, -- Used if an edge or corner was selected.
-	anchorAlignmentCFrame: CFrame? -- Used if an edge or corner was selected.
-): { Method1: Vector3, Method2: Vector3 }?
-	-- Calculate alignment points.
-	local absTargetObjectNormal = targetObjectNormal:Abs()
-	local targetAlignmentPoint = targetAlignmentCFrame
-		or target.CFrame * CFrame.new(targetObjectNormal * (target.Size:Dot(absTargetObjectNormal) / 2))
-	local anchorAlignmentPoint = anchorAlignmentCFrame
-		or anchor.CFrame * CFrame.new(anchorObjectNormal * (anchor.Size:Dot(anchorObjectNormal:Abs()) / 2))
-
-	-- Method 1: Project the attachment point onto the target's world normal to find the point along the normal.
-	local targetWorldNormal = target.CFrame:VectorToWorldSpace(targetObjectNormal)
-	local vectorToAnchorSurface = anchorAlignmentPoint.Position - targetAlignmentPoint.Position
-	local length = targetWorldNormal:Dot(vectorToAnchorSurface)
-	local method1Translation = targetWorldNormal * length
-
-	-- Method 2: Find the closest world normal to targetWorldNormal.
-	local closestNormal = nil :: Vector3?
-	local closestProjection = -1
-	for _, axis in { Vector3.xAxis, Vector3.yAxis, Vector3.zAxis } do
-		local projection = axis:Dot(target.CFrame:VectorToWorldSpace(absTargetObjectNormal):Abs())
-		if projection > closestProjection then
-			closestNormal = axis
-			closestProjection = projection
-		elseif math.abs(closestProjection - projection) < 1e-7 then
-			-- If two axes are equally close, then use the target's object normal. This only happens with 45-degree rotations.
-			closestNormal = absTargetObjectNormal
-		end
+-- The direction the target travels, and the point on it that has to land on the anchor.
+--
+-- Picking a face, edge or corner gives both directly: travel along that face's normal, measured from the point
+-- that was picked. A whole object gives neither, since no face of it was chosen. Travelling along whichever
+-- face the cursor happened to be over at the time is arbitrary and is what made aligning a model to a surface
+-- slide it sideways. Instead it travels along the anchor's normal and lands the near side of its bounding box
+-- on the anchor, so aligning a model to a floor sets it down on that floor.
+const function GetTravel(target: Pick, anchor: Pick, respectPartPivot: boolean): (Vector3, Vector3)
+	if target.Kind ~= "Part" then
+		return target.Normal, target.Point
 	end
-	local method2Translation = (closestNormal :: Vector3) * vectorToAnchorSurface
 
-	-- Return translation vectors for both methods if select method setting is enabled.
+	const reference = ModelHelper.GetReferenceCFrame(target.Subject, respectPartPivot)
+	const localNormal = reference:VectorToObjectSpace(anchor.Normal)
+	const reach = GeometryHelper.GetExtentAlong(ModelHelper.GetSize(target.Subject), localNormal) / 2
+	return anchor.Normal, target.Point - (anchor.Normal * reach)
+end
+
+-- Align To --
+const AlignTo = {}
+
+function AlignTo.GetTranslations(target: Pick, anchor: Pick): Translations
+	const direction, origin = GetTravel(target, anchor, SettingsService.Get("RespectPartPivot"))
+	const delta = anchor.Point - origin
+
+	-- How far along that direction the point has to travel to land on the anchor's plane.
+	const alignment = direction:Dot(anchor.Normal)
+	const distance = if math.abs(alignment) < MINIMUM_PLANE_ALIGNMENT
+		then delta:Dot(direction)
+		else delta:Dot(anchor.Normal) / alignment
+
+	-- Constraining to a single world axis keeps a rotated part from drifting sideways, which is sometimes what
+	-- is wanted even though it does not end up flush. The sign cancels out, so a signed axis is fine here.
+	const dominantAxis = GeometryHelper.SnapToAxis(direction)
+	return {
+		AlongNormal = direction * distance,
+		NearestAxis = dominantAxis * delta:Dot(dominantAxis),
+	}
+end
+
+-- Runs the mode. When the viewport method picker is on and the two results actually differ, the translations
+-- are handed back so the caller can let the user choose; otherwise the alignment is applied immediately.
+function AlignTo.Run(target: Pick, anchor: Pick): Translations?
+	const translations = AlignTo.GetTranslations(target, anchor)
 	if
-		SettingsService.Get("SelectMethodAfterAlignment")
-		and not method1Translation:FuzzyEq(method2Translation, 1e-5)
+		SettingsService.Get("AlignChooseInViewport")
+		and not translations.AlongNormal:FuzzyEq(translations.NearestAxis, 1e-4)
 	then
-		return { Method1 = method1Translation, Method2 = method2Translation }
+		return translations
 	end
 
-	-- Apply alignment.
-	Align(target, if SettingsService.Get("AlignInMultipleAxes") then method1Translation else method2Translation)
+	Align(
+		target,
+		if SettingsService.Get("AlignOnNearestAxis") then translations.NearestAxis else translations.AlongNormal
+	)
 	return nil
 end
 
 AlignTo.Align = Align
-return AlignTo
+return table.freeze(AlignTo)

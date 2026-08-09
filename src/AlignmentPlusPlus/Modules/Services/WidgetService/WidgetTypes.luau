@@ -1,10 +1,12 @@
---- Types ---
-export type CategoryUi = Frame & {
+-- Types --
+-- Categories and setting rows are buttons rather than frames so that the whole row is clickable, not just the
+-- small control at the end of it.
+export type CategoryUi = TextButton & {
 	Break: Frame,
 	Title: TextLabel,
 	ToggleExpansion: TextButton,
 }
-export type RadioButtonUi = Frame & {
+export type RadioButtonUi = TextButton & {
 	HelpButton: ImageButton & {
 		Corner: UICorner,
 		QuestionMark: TextLabel,
@@ -22,7 +24,7 @@ export type RadioButtonUi = Frame & {
 
 	SettingName: TextLabel,
 }
-export type SwitchUi = Frame & {
+export type SwitchUi = TextButton & {
 	HelpButton: ImageButton & {
 		Corner: UICorner,
 		QuestionMark: TextLabel,
@@ -42,46 +44,60 @@ export type SwitchUi = Frame & {
 }
 export type Ui = Frame & {
 	Selection: Frame & {
-		Anchor: TextLabel,
+		Prompt: TextLabel,
+		Slot1: TextLabel,
+		Slot2: TextLabel,
+		Slot3: TextLabel,
+		Hint: TextLabel,
+
 		ListLayout: UIListLayout,
-		NoSelections: TextLabel,
 		Padding: UIPadding,
 		SizeConstraint: UISizeConstraint,
-		Target: TextLabel,
 	},
 
 	Settings: ScrollingFrame & {
 		-- Categories
-		AccessibilityOptions: CategoryUi,
-		AlignAttachSetToOptions: CategoryUi,
-		AlignmentMode: CategoryUi,
+		ModeOptions: CategoryUi,
 		AlignToOptions: CategoryUi,
-		GeneralOptions: CategoryUi,
 		SetToOptions: CategoryUi,
+		SubjectOptions: CategoryUi,
+		SelectionOptions: CategoryUi,
+		GeneralOptions: CategoryUi,
 
-		-- Radio Buttons
-		AlignInMultipleAxes: RadioButtonUi,
-		AlignRootmostModel: RadioButtonUi,
+		-- Modes
 		AlignTo: RadioButtonUi,
 		AttachTo: RadioButtonUi,
-		PlaceBetween: RadioButtonUi,
-		ConstrainAligningToOneAxis: RadioButtonUi,
-		PartOnly: RadioButtonUi,
+		PointAt: RadioButtonUi,
 		ResizeTo: RadioButtonUi,
-		SelectMethodAfterAlignment: RadioButtonUi,
-		SetPositionOrientationAndSize: RadioButtonUi,
+		SetTo: RadioButtonUi,
+		PlaceBetween: RadioButtonUi,
+
+		-- Align To options
+		AlignAlongNormal: RadioButtonUi,
+		AlignOnNearestAxis: RadioButtonUi,
+		AlignChooseInViewport: RadioButtonUi,
+
+		-- Set To options
 		SetPositionAndOrientation: RadioButtonUi,
+		SetPositionOrientationAndSize: RadioButtonUi,
 		SetPositionOnly: RadioButtonUi,
 		SetOrientationOnly: RadioButtonUi,
 		SetSizeOnly: RadioButtonUi,
-		SetTo: RadioButtonUi,
+
+		-- What a manipulation moves
+		SubjectAutoModel: RadioButtonUi,
+		SubjectRootmostModel: RadioButtonUi,
+		SubjectPartOnly: RadioButtonUi,
 
 		-- Switches
+		AdvancedMode: SwitchUi,
 		ContrastPartHighlighting: SwitchUi,
+		KeepTargetAfterAction: SwitchUi,
 		LockedAnchorPartsSelectable: SwitchUi,
 		LockedTargetPartsSelectable: SwitchUi,
 		NoCanCollideQueryAnchorSelectable: SwitchUi,
 		NoCanCollideQueryTargetSelectable: SwitchUi,
+		PlaySounds: SwitchUi,
 		RespectPartPivot: SwitchUi,
 
 		ListLayout: UIListLayout,
@@ -107,5 +123,5 @@ export type Ui = Frame & {
 	Padding: UIPadding,
 }
 
---- Widget Types ---
+-- Widget Types --
 return true

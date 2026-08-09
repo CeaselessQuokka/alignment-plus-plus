@@ -29,7 +29,8 @@ function AttributeHelper.Get<T>(instance: Instance, name: string, validator: Val
 		const isValid, reason = validator(value, name)
 		assert(isValid, ERROR:format("Get", name, tostring(value), reason or "N/A", instance:GetFullName()))
 	end
-	return if value == nil then default else value
+	-- GetAttribute is typed as unknown, and the validator is what actually vouches for the shape.
+	return if value == nil then default else value :: any
 end
 
 -- The "with" parameter accepts any valid Lua pattern.
@@ -84,7 +85,7 @@ function AttributeHelper.GetAsArray<T>(
 	end
 
 	const elements: { T } = {}
-	for _, element in value:split(",") do
+	for _, element in (value :: string):split(",") do
 		if stripWhitespace then
 			element = element:match("^%s*(.-)%s*$") or ""
 		end
@@ -97,7 +98,8 @@ function AttributeHelper.GetAsArray<T>(
 			assert(isValid, ERROR:format("GetAsArray -> for", name, element, reason or "N/A", instance:GetFullName()))
 		end
 
-		table.insert(elements, if transformer then transformer(element) else element)
+		-- Without a transformer the element is its own result, which only the caller can name a type for.
+		table.insert(elements, if transformer then transformer(element) else element :: any)
 	end
 	return elements
 end
@@ -133,10 +135,11 @@ function AttributeHelper.OnAttributeChanged<T>(
 	)
 
 	const function OnAttributeChanged()
-		callback(AttributeHelper.Get(instance, name, validator, default))
+		-- Get is optional by nature, but a caller that supplied a default is guaranteed a value back.
+		callback(AttributeHelper.Get(instance, name, validator, default) :: any)
 	end
 	task.defer(OnAttributeChanged)
 	return instance:GetAttributeChangedSignal(name):Connect(OnAttributeChanged)
 end
 
-return AttributeHelper
+return table.freeze(AttributeHelper)

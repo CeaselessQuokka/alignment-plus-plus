@@ -1,114 +1,139 @@
---[[
-
-	If you're viewing this script, I'd like to apologize in advance. This is the messiest script in the entire plugin.
-	I just really wanted to get this plugin out, and I plan to hopefully rewrite this in the future, but for now, it's functional.
-
---]]
-
 --!strict
---- Services ---
-local ChangeHistoryService = game:GetService("ChangeHistoryService")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local Workspace = game:GetService("Workspace")
+-- Services --
+const ChangeHistoryService = game:GetService("ChangeHistoryService")
+const RunService = game:GetService("RunService")
+const UserInputService = game:GetService("UserInputService")
+const Workspace = game:GetService("Workspace")
 
---- Imports ---
-local Signal = require(script.Parent.Parent.Packages.Signal)
-local Trove = require(script.Parent.Parent.Packages.Trove)
+-- Imports --
+const Signal = require(script.Parent.Parent.Packages.Signal)
+const Trove = require(script.Parent.Parent.Packages.Trove)
 
-local SettingsService = require(script.Parent.SettingsService)
+const InputService = require(script.Parent.InputService)
+const SettingsService = require(script.Parent.SettingsService)
 
-local ColorHelper = require(script.Parent.Parent.Helpers.ColorHelper)
-local HighlightHelper = require(script.Parent.Parent.Helpers.HighlightHelper)
-local ModelHelper = require(script.Parent.Parent.Helpers.ModelHelper)
+const ColorHelper = require(script.Parent.Parent.Helpers.ColorHelper)
+const GeometryHelper = require(script.Parent.Parent.Helpers.GeometryHelper)
+const HighlightHelper = require(script.Parent.Parent.Helpers.HighlightHelper)
+const ModeHelper = require(script.Parent.Parent.Helpers.ModeHelper)
+const ModelHelper = require(script.Parent.Parent.Helpers.ModelHelper)
+const PickHelper = require(script.Parent.Parent.Helpers.PickHelper)
 
-local AlignTo = require(script.Parent.Parent.Features.AlignTo)
-local AttachTo = require(script.Parent.Parent.Features.AttachTo)
-local PlaceBetween = require(script.Parent.Parent.Features.PlaceBetween)
-local ResizeTo = require(script.Parent.Parent.Features.ResizeTo)
-local SetTo = require(script.Parent.Parent.Features.SetTo)
+const AlignTo = require(script.Parent.Parent.Features.AlignTo)
+const AttachTo = require(script.Parent.Parent.Features.AttachTo)
+const PlaceBetween = require(script.Parent.Parent.Features.PlaceBetween)
+const PointAt = require(script.Parent.Parent.Features.PointAt)
+const ResizeTo = require(script.Parent.Parent.Features.ResizeTo)
+const SetTo = require(script.Parent.Parent.Features.SetTo)
 
---- Types ---
-type AlignmentMethod = "Method1" | "Method2"
-type AlignmentBoundingBoxes = Model & { Method1: BasePart, Method2: BasePart }
-type PossibleAlignments = { Method1: Vector3, Method2: Vector3 }
+-- Types --
+type Pick = PickHelper.Pick
+type Mode = ModeHelper.Mode
 type MethodLabel = typeof(script.Parent.Parent.Parent.Assets.Ui.MethodLabel)
 
---- Variables ---
-local SETTINGS_THAT_RESET_SELECTION = table.freeze({
+-- What the cursor is currently over, before it has been committed to a slot.
+type Hover = {
+	Part: BasePart,
+	Subject: ModelHelper.Subject,
+	Basis: GeometryHelper.FaceBasis,
+	Layout: HighlightHelper.Layout?, -- Only built while handles are being drawn.
+	Element: GeometryHelper.Element,
+	ElementIndex: number?,
+	Colors: HighlightHelper.Colors,
+	ColorsAreContrasting: boolean, -- Which mode the cached colors were built for.
+	SlotColor: Color3, -- The slot this would fill, which the subject outline is drawn in.
+	ShowsHandles: boolean,
+}
+
+-- Hover is rebuilt from scratch every frame, so a press and its release are matched on what was under the
+-- cursor rather than on the identity of the table describing it.
+type PressedElement = {
+	Part: BasePart,
+	Kind: GeometryHelper.PickKind,
+	ElementIndex: number?,
+}
+
+-- The two candidate results of an alignment, drawn in the viewport for the user to choose between.
+type AlignmentChoice = {
+	Target: Pick,
+	Translations: AlignTo.Translations,
+	Ghosts: Model,
+	Label: MethodLabel,
+	Hovered: BasePart?,
+}
+
+-- Variables --
+-- Changing any of these invalidates whatever is part way through being selected.
+const SETTINGS_THAT_RESET_SELECTION: { [SettingsService.SettingName]: boolean } = table.freeze({
 	AlignTo = true,
 	AttachTo = true,
+	PointAt = true,
 	ResizeTo = true,
 	SetTo = true,
-	PartOnly = true,
-	AlignRootmostModel = true,
+	PlaceBetween = true,
+	SubjectAutoModel = true,
+	SubjectRootmostModel = true,
+	SubjectPartOnly = true,
 })
 
---- Functions ---
-local function RunWithUndo<T>(fn: (...any) -> T?, ...): T?
-	local recordingId = ChangeHistoryService:TryBeginRecording("AlignmentPlusPlus", "AlignmentPlusPlus")
+const GHOST_UNCHOSEN_COLOR = Color3.fromRGB(255, 0, 0)
+const GHOST_CHOSEN_COLOR = Color3.fromRGB(0, 255, 0)
+
+-- Handle outlines stay a flat dark color rather than following the palette, so that the shape of a buried
+-- handle always reads against whatever it is buried in.
+const OUTLINE_COLOR = Color3.fromRGB(0, 0, 0)
+
+-- A ray long enough to cross any reasonable place, and a cap on how many rejected parts we will see through
+-- before giving up.
+const RAY_LENGTH = 2 ^ 14
+const MAXIMUM_RAY_RETRIES = 16
+
+-- How much nearer something has to be before it takes the hovered face away from under the cursor. Handles
+-- float slightly proud of the surface, so a little slack stops the face flickering against its own highlight.
+const STICKY_DEPTH_TOLERANCE = 0.1
+
+-- Functions --
+const function RunWithUndo<T>(fn: (...any) -> T?, ...): T?
+	const recordingId = ChangeHistoryService:TryBeginRecording("AlignmentPlusPlus", "AlignmentPlusPlus")
 	if not recordingId then
 		return nil
 	end
 
-	local success, result: string | T? = pcall(fn, ...)
+	const success, result: any = pcall(fn, ...)
 	if success then
 		ChangeHistoryService:FinishRecording(recordingId, Enum.FinishRecordingOperation.Commit)
-		return result :: T
-	else
-		ChangeHistoryService:FinishRecording(recordingId, Enum.FinishRecordingOperation.Cancel)
-		warn(`[Alignment++] Could not align because: {debug.traceback(result :: string)}`)
-		return nil
+		return result
 	end
+
+	ChangeHistoryService:FinishRecording(recordingId, Enum.FinishRecordingOperation.Cancel)
+	warn(`[Alignment++] Could not complete the action because: {debug.traceback(tostring(result))}`)
+	return nil
 end
 
---- Selection Service ---
-local SelectionService = {
-	--- Boilerplate
+-- Selection Service --
+const SelectionService = {
+	-- Boilerplate
 	Initialized = false,
 	Started = false,
 	_trove = Trove.new(),
 	_plugin = nil :: Plugin?,
 
-	--- Service Specific
+	-- Service Specific
 	OnSelectionChanged = Signal.new() :: Signal.Signal<>,
 
-	-- General state.
+	Picks = {} :: { Pick }, -- Selections committed so far, in slot order.
+	HoverKind = nil :: GeometryHelper.PickKind?, -- What clicking right now would select.
+	HoverSubject = nil :: ModelHelper.Subject?, -- What clicking right now would select it on.
+
 	_mouse = nil :: PluginMouse?,
-
-	-- Hover related state.
-	_lastSelection = nil :: BasePart?,
-	_lastHighlight = nil :: (CylinderHandleAdornment | SphereHandleAdornment)?,
-	_lastObjectNormal = nil :: Vector3?,
-	_currentHighlightTrove = nil :: Trove.Trove?, -- Contains the current highlighting instances and connections.
-	_surfaceHighlight = nil :: BasePart?, -- Used solely for raycast exclusion.
-
-	-- Selection related state.
-	Target = nil :: BasePart?,
-	Anchor = nil :: BasePart?,
-	Anchor2 = nil :: BasePart?,
-	_hoveringOverEdgeOrCorner = false, -- Used to determine if target/anchorAlignmentCFrame should be used.
-	_currentSelection = nil :: (BasePart | CylinderHandleAdornment | SphereHandleAdornment)?,
-	_targetObjectNormal = nil :: Vector3?, -- Used for align and resize to.
-	_anchorObjectNormal = nil :: Vector3?, -- Used for align and resize to.
-	_targetAlignmentCFrame = nil :: CFrame?, -- Used for edge and corner selection.
-	_anchorAlignmentCFrame = nil :: CFrame?, -- Used for edge and corner selection.
-
-	-- Alignment method selection related state.
-	_alignmentMethodSelectionEnabled = false, -- Whether the user can select between multiple alignment methods.
-	_alignmentTarget = nil :: BasePart?, -- The target that was selected.
-	_possibleAlignments = nil :: PossibleAlignments?, -- The possible alignment translations.
-	_alignmentBoundingBoxes = nil :: AlignmentBoundingBoxes?, -- Used to show the user the two alignment methods.
-	_methodLabel = nil :: MethodLabel?, -- The label that shows which method is which.
-	_lastSelectedMethod = nil :: BasePart?, -- The last selected alignment method.
-	_selectedAlignmentMethod = nil :: AlignmentMethod?, -- The currently selected alignment method.
-
-	-- Place Between method related state.
-	_anchor2 = nil :: BasePart?, -- The second anchor for the Place Between alignment mode.
-	_anchor2ObjectNormal = nil :: Vector3?, -- Used for align and resize to.
-	_anchor2AlignmentCFrame = nil :: CFrame?, -- Used for edge and corner selection.
+	_hover = nil :: Hover?,
+	_surface = nil :: HighlightHelper.Surface?,
+	_hoverBox = nil :: SelectionBox?,
+	_pressed = nil :: PressedElement?, -- Guards against press and release landing on different things.
+	_committedTrove = nil :: Trove.Trove?,
+	_alignmentChoice = nil :: AlignmentChoice?,
 }
-local self = SelectionService
+const self = SelectionService
 
 function SelectionService.Init(plugin: Plugin)
 	assert(not self.Initialized, `{script.Name} was already initialized`)
@@ -122,175 +147,70 @@ function SelectionService.Start()
 	assert(self.Initialized, `{script.Name} was not initialized`)
 	assert(not self.Started, `{script.Name} was already started`)
 
-	-- Handle part highlighting.
-	local mouse = self._mouse :: PluginMouse
-	self._trove:Add(mouse.Move:Connect(function()
-		if self._hoveringOverEdgeOrCorner then
-			return
-		end
+	const mouse = self._mouse :: PluginMouse
 
-		if self._alignmentMethodSelectionEnabled then
-			local selection = self.GetSelection(true)
-			if selection then
-				if self._lastSelectedMethod == selection then
-					return
-				end
-
-				if self._lastSelectedMethod then
-					local highlight = self._lastSelectedMethod:FindFirstChildOfClass("Highlight") :: Highlight
-					highlight.FillColor = Color3.fromRGB(255, 0, 0)
-				end
-				local highlight = (selection :: BasePart):FindFirstChildOfClass("Highlight") :: Highlight
-				highlight.FillColor = Color3.fromRGB(0, 255, 0)
-				self._lastSelectedMethod = selection
-				local otherBox = if selection.Name == "Method1"
-					then (self._alignmentBoundingBoxes :: AlignmentBoundingBoxes).Method2
-					else (self._alignmentBoundingBoxes :: AlignmentBoundingBoxes).Method1
-				otherBox.Locked = true
-				(self._methodLabel :: MethodLabel).Method.Method.Text = if selection.Name == "Method1"
-					then "Single Axis"
-					else "Multiple Axes"
-				otherBox.Transparency = 1
-				(self._methodLabel :: MethodLabel).Parent = selection :: BasePart
-			elseif self._lastSelectedMethod then
-				local highlight = self._lastSelectedMethod:FindFirstChildOfClass("Highlight") :: Highlight
-				highlight.FillColor = Color3.fromRGB(255, 0, 0)
-				local otherBox = if self._lastSelectedMethod.Name == "Method1"
-					then (self._alignmentBoundingBoxes :: AlignmentBoundingBoxes).Method2
-					else (self._alignmentBoundingBoxes :: AlignmentBoundingBoxes).Method1
-				otherBox.Locked = false
-				otherBox.Transparency = 0
-				self._lastSelectedMethod = nil
-				(self._methodLabel :: MethodLabel).Parent = nil
-			end
-			return
-		end
-
-		local isTarget = self.Target == nil
-		local selection, objectNormal = self.GetSelection(isTarget)
-		if not selection or not objectNormal then
-			-- No selection found, clean any previous highlighting.
-			if self._currentHighlightTrove then
-				self._trove:Remove(self._currentHighlightTrove)
-				self._currentHighlightTrove = nil
-			end
-			if self._lastSelection then
-				self.OnSelectionChanged:FireDeferred()
-			end
-			self._lastSelection = nil
-			self._lastObjectNormal = nil
-			self._surfaceHighlight = nil
-			return
-		end
-
-		-- Do nothing if hovering over the same part and surface as before.
-		if self._lastSelection == selection and self._lastObjectNormal == objectNormal then
-			return
-		end
-
-		-- A new surface or part is being hovered over. Clean previous highlighting, and apply new highlighting.
-		if self._currentHighlightTrove then
-			self._trove:Remove(self._currentHighlightTrove)
-		end
-		self._lastSelection = selection
-		self._lastObjectNormal = objectNormal
-		self._currentHighlightTrove = self.HighlightPart(selection, objectNormal)
-		self.OnSelectionChanged:FireDeferred()
+	-- Hover is resolved every frame rather than only on mouse movement, because zooming, orbiting and holding
+	-- a modifier all change what is under the cursor without the cursor itself moving.
+	self._trove:Add(RunService.Heartbeat:Connect(function()
+		self._UpdateHover()
 	end))
 
-	-- Handle part selection, and actual plugin functionality (once both target and anchor are selected).
 	self._trove:Add(mouse.Button1Down:Connect(function()
-		if self._hoveringOverEdgeOrCorner then
+		if self._alignmentChoice then
 			return
 		end
 
-		if self._alignmentMethodSelectionEnabled then
-			if self._lastSelectedMethod then
-				self._selectedAlignmentMethod = self._lastSelectedMethod.Name :: AlignmentMethod
-			else
-				self._ClearSelection(true)
-			end
-			return
-		end
-
-		self._currentSelection = self.GetSelection(self.Target == nil)
+		const hover = self._hover
+		self._pressed = if hover
+			then { Part = hover.Part, Kind = hover.Element.Kind, ElementIndex = hover.ElementIndex }
+			else nil
 	end))
+
 	self._trove:Add(mouse.Button1Up:Connect(function()
-		if self._hoveringOverEdgeOrCorner then
+		if self._alignmentChoice then
+			self._ChooseAlignment()
 			return
 		end
 
-		if self._selectedAlignmentMethod then
-			if self._alignmentTarget and self._possibleAlignments then
-				RunWithUndo(
-					AlignTo.Align,
-					self._alignmentTarget,
-					self._possibleAlignments[self._selectedAlignmentMethod]
-				)
-			end
-			self._ClearSelection(true)
+		const hover = self._hover
+		const pressed = self._pressed
+		self._pressed = nil
+		if
+			not hover
+			or not pressed
+			or hover.Part ~= pressed.Part
+			or hover.Element.Kind ~= pressed.Kind
+			or hover.ElementIndex ~= pressed.ElementIndex
+		then
 			return
 		end
 
-		local isTarget = self.Target == nil
-		local selection = self.GetSelection(isTarget)
-		if not selection or not self._currentSelection or selection ~= self._currentSelection :: BasePart then
-			self._currentSelection = nil
+		self._CommitPick(hover)
+	end))
+
+	self._trove:Add(UserInputService.InputEnded:Connect(function(input, gameProcessed)
+		if gameProcessed or input.UserInputType ~= Enum.UserInputType.Keyboard then
 			return
 		end
 
-		if isTarget then
-			-- Set target selection state.
-			self.Target = self._currentSelection :: BasePart
-			self._targetObjectNormal = self._lastObjectNormal
-		else
-			if SettingsService.Get("PlaceBetween") and self.Anchor then
-				self.Anchor2 = self._currentSelection :: BasePart
-				self._anchor2ObjectNormal = self._lastObjectNormal
-				if self.Anchor2 then
-					self._ApplyManipulation()
-				else
-					self.OnSelectionChanged:FireDeferred()
-				end
-				self._currentSelection = nil
-				return
-			end
-
-			-- Set anchor selection state.
-			self.Anchor = self._currentSelection :: BasePart
-			self._anchorObjectNormal = self._lastObjectNormal
-		end
-
-		if self.Anchor and not SettingsService.Get("PlaceBetween") then
-			-- Both selections have been made, apply the manipulation.
-			self._ApplyManipulation()
-		else
+		if input.KeyCode == Enum.KeyCode.Escape then
+			self.Clear()
+		elseif input.KeyCode == Enum.KeyCode.Backspace and #self.Picks > 0 and not self._alignmentChoice then
+			-- Stepping back one selection at a time is far less punishing than losing all of them.
+			table.remove(self.Picks)
+			self._RebuildCommittedVisuals()
 			self.OnSelectionChanged:FireDeferred()
 		end
-		self._currentSelection = nil
 	end))
 
-	-- Cancel selection on escape.
-	self._trove:Add(UserInputService.InputEnded:Connect(function(input, gameProcessed)
-		if
-			not gameProcessed
-			and input.UserInputType == Enum.UserInputType.Keyboard
-			and input.KeyCode == Enum.KeyCode.Escape
-		then
-			self._ClearSelection(true)
-		end
-	end))
-
-	-- Reset highlighting when changing mode.
 	self._trove:Add(SettingsService.OnSettingChanged:Connect(function(settingName)
 		if SETTINGS_THAT_RESET_SELECTION[settingName] then
-			self._ClearSelection(true)
+			self.Clear()
 		end
 	end))
 
-	-- When undoing an alignment selection, clear selection state.
 	self._trove:Add(ChangeHistoryService.OnUndo:Connect(function()
-		self._ClearSelection(true)
+		self.Clear()
 	end))
 
 	-- Update service state.
@@ -301,462 +221,554 @@ function SelectionService.Stop()
 	assert(self.Started, `{script.Name} was not started`)
 
 	self._trove:Clean()
-	self._ClearSelection(true)
+	self.Clear()
 	self.Started = false
 end
 
 function SelectionService.Unload()
 	pcall(self.Stop)
+	self.OnSelectionChanged:DisconnectAll()
 end
 
--- Returns the part that was clicked, and the surface vector it clicked on.
-function SelectionService.GetSelection(forTarget: boolean): (BasePart?, Vector3?)
-	local mouse = self._mouse :: PluginMouse
-	local rayParams = self._GetRaycastParams(forTarget)
-	local origin = Workspace.CurrentCamera.CFrame.Position
-	local direction = mouse.UnitRay.Direction * (2 ^ 14)
-	local rayResult = Workspace:Raycast(origin, direction, rayParams)
-	if not rayResult then
-		return nil, nil
-	end
-
-	local includeLocked = SettingsService.Get(
-		`Locked{if forTarget then "Target" else "Anchor"}PartsSelectable` :: SettingsService.SettingName
-	)
-	local selection: BasePart = rayResult.Instance
-	if selection.Locked and not includeLocked then
-		return nil, nil
-	end
-
-	-- Get object normal from world normal.
-	local objectNormal = rayResult.Instance.CFrame:VectorToObjectSpace(rayResult.Normal)
-
-	-- Round each axis to remove floating point inaccuracies.
-	local absObjectNormal = objectNormal:Abs()
-	local maxAxis = math.max(absObjectNormal.X, absObjectNormal.Y, absObjectNormal.Z)
-	local epsilon = 1e-8
-	if math.abs(maxAxis - absObjectNormal.X) < epsilon then
-		objectNormal = Vector3.new(math.sign(objectNormal.X), 0, 0)
-	elseif math.abs(maxAxis - absObjectNormal.Y) < epsilon then
-		objectNormal = Vector3.new(0, math.sign(objectNormal.Y), 0)
-	else
-		objectNormal = Vector3.new(0, 0, math.sign(objectNormal.Z))
-	end
-	return selection, objectNormal
+-- The slot the next click will fill, or nil once every slot is taken.
+function SelectionService.GetCurrentSlot(): ModeHelper.Slot?
+	return ModeHelper.GetActiveMode().Slots[#self.Picks + 1]
 end
 
-function SelectionService._GetRaycastParams(forTarget: boolean): RaycastParams
-	local shouldBruteForce = SettingsService.Get(
-		`NoCanCollideQuery{if forTarget then "Target" else "Anchor"}Selectable` :: SettingsService.SettingName
-	) :: boolean
-	local pickingAlignment = self._alignmentMethodSelectionEnabled
-	local rayParams = RaycastParams.new()
-	local exclusions: { any } = {}
-	if not pickingAlignment then
-		table.insert(exclusions, self._surfaceHighlight)
-		table.insert(exclusions, self.Target)
-		table.insert(exclusions, self.Anchor)
-		if self.Target and not SettingsService.Get("ResizeTo") and not SettingsService.Get("PartOnly") then
-			table.insert(exclusions, ModelHelper.GetPartModel(self.Target))
-		end
-	end
-	rayParams.FilterType = if pickingAlignment then Enum.RaycastFilterType.Include else Enum.RaycastFilterType.Exclude
-	rayParams.FilterDescendantsInstances = (
-		if pickingAlignment then { self._alignmentBoundingBoxes } else exclusions
-	) :: any
-	rayParams.BruteForceAllSlow = not pickingAlignment and shouldBruteForce
-	rayParams.IgnoreWater = true
-	return rayParams
+function SelectionService.IsChoosingAlignment(): boolean
+	return self._alignmentChoice ~= nil
 end
 
-function SelectionService.HighlightPart(part: BasePart, objectNormal: Vector3): Trove.Trove
-	local highlightColors = SelectionService._GetHighlightColors(part)
-	local highlightTrove = self._trove:Extend()
-
-	-- Set To and Place Between highlighting.
-	if SettingsService.Get("SetTo") or (SettingsService.Get("PlaceBetween") and not self.Target) then
-		local selectionBox = highlightTrove:Add(HighlightHelper.HighlightPart(part))
-		selectionBox.Color3 = highlightColors.Part
-		selectionBox.SurfaceColor3 = highlightColors.Part
-		return highlightTrove
+-- How far out from the picked part to reach for the thing a manipulation moves. A held modifier overrides the
+-- setting, so the scope can be changed for a single pick without leaving the viewport.
+function SelectionService.GetSubjectScope(mode: Mode): ModelHelper.SubjectScope
+	if mode.PartsOnly or InputService.PartOnlyHeld then
+		return "Part"
+	elseif InputService.OutermostModelHeld then
+		return "OutermostModel"
+	elseif SettingsService.Get("SubjectPartOnly") then
+		return "Part"
+	elseif SettingsService.Get("SubjectRootmostModel") then
+		return "OutermostModel"
 	end
-
-	-- Surface highlighting.
-	local surfaceHighlight = highlightTrove:Add(HighlightHelper.HighlightSurface(part, objectNormal))
-	surfaceHighlight.Color = highlightColors.Surface
-	self._surfaceHighlight = surfaceHighlight
-
-	-- Edge highlighting (visible for every mode).
-	local edgeHighlights: { CylinderHandleAdornment } = {}
-	if not SettingsService.Get("ResizeTo") or self.Target then
-		edgeHighlights = HighlightHelper.HighlightEdges(part, objectNormal)
-		for _, edgeHighlight in edgeHighlights do
-			highlightTrove:Add(edgeHighlight)
-			edgeHighlight.Color3 = highlightColors.Edge
-
-			-- Handle edge highlight mouse events.
-			highlightTrove:Add(edgeHighlight.MouseEnter:Connect(function()
-				if self._lastHighlight and self._lastHighlight.ClassName == "SphereHandleAdornment" then
-					return
-				end
-
-				if self._lastHighlight then
-					if self._lastHighlight.ClassName == "CylinderHandleAdornment" then
-						(self._lastHighlight :: CylinderHandleAdornment).Color3 = highlightColors.Edge
-					else
-						(self._lastHighlight :: SphereHandleAdornment).Color3 = highlightColors.Corner
-					end
-				end
-				self._hoveringOverEdgeOrCorner = true
-				edgeHighlight.Color3 = highlightColors.Hover
-				self._lastHighlight = edgeHighlight
-			end))
-			highlightTrove:Add(edgeHighlight.MouseLeave:Connect(function()
-				self._hoveringOverEdgeOrCorner = false
-				edgeHighlight.Color3 = highlightColors.Edge
-				self._lastHighlight = nil
-			end))
-			highlightTrove:Add(edgeHighlight.MouseButton1Down:Connect(function()
-				self._currentSelection = self._lastHighlight
-			end))
-			highlightTrove:Add(edgeHighlight.MouseButton1Up:Connect(function()
-				if not self._currentSelection or self._currentSelection ~= edgeHighlight then
-					return
-				end
-
-				if not self.Target then
-					-- Set target selection state.
-					self.Target = part
-					self._targetObjectNormal = self._lastObjectNormal
-					self._targetAlignmentCFrame = part.CFrame * edgeHighlight.CFrame
-				else
-					if SettingsService.Get("PlaceBetween") and self.Anchor then
-						self.Anchor2 = self._currentSelection :: BasePart
-						self._anchor2ObjectNormal = self._lastObjectNormal
-						self._anchor2AlignmentCFrame = part.CFrame * edgeHighlight.CFrame
-						if self.Anchor2 then
-							self._ApplyManipulation()
-						else
-							self.OnSelectionChanged:FireDeferred()
-						end
-						self._currentSelection = nil
-						return
-					end
-
-					-- Set anchor selection state.
-					self.Anchor = part
-					self._anchorObjectNormal = self._lastObjectNormal
-					self._anchorAlignmentCFrame = part.CFrame * edgeHighlight.CFrame
-				end
-
-				if self.Anchor and not SettingsService.Get("PlaceBetween") then
-					-- Both selections have been made, apply the manipulation.
-					self._ApplyManipulation()
-				else
-					self.OnSelectionChanged:FireDeferred()
-				end
-				self._currentSelection = nil
-			end))
-		end
-	end
-	local cornerHighlights: { SphereHandleAdornment } = {}
-	if not SettingsService.Get("ResizeTo") then
-		-- Corner highlighting.
-		cornerHighlights = HighlightHelper.HighlightCorners(part, objectNormal)
-		for _, cornerHighlight in cornerHighlights do
-			highlightTrove:Add(cornerHighlight)
-			cornerHighlight.Color3 = highlightColors.Corner
-
-			-- Handle corner highlight mouse events.
-			highlightTrove:Add(cornerHighlight.MouseEnter:Connect(function()
-				if self._lastHighlight then
-					if self._lastHighlight.ClassName == "CylinderHandleAdornment" then
-						(self._lastHighlight :: CylinderHandleAdornment).Color3 = highlightColors.Edge
-					else
-						(self._lastHighlight :: SphereHandleAdornment).Color3 = highlightColors.Corner
-					end
-				end
-				self._hoveringOverEdgeOrCorner = true
-				cornerHighlight.Color3 = highlightColors.Hover
-				self._lastHighlight = cornerHighlight
-			end))
-			highlightTrove:Add(cornerHighlight.MouseLeave:Connect(function()
-				self._hoveringOverEdgeOrCorner = false
-				cornerHighlight.Color3 = highlightColors.Corner
-				self._lastHighlight = nil
-			end))
-			highlightTrove:Add(cornerHighlight.MouseButton1Down:Connect(function()
-				self._currentSelection = self._lastHighlight
-			end))
-			highlightTrove:Add(cornerHighlight.MouseButton1Up:Connect(function()
-				if not self._currentSelection or self._currentSelection ~= cornerHighlight then
-					return
-				end
-
-				if not self.Target then
-					-- Set target selection state.
-					self.Target = part
-					self._targetObjectNormal = self._lastObjectNormal
-					self._targetAlignmentCFrame = part.CFrame * cornerHighlight.CFrame
-				else
-					if SettingsService.Get("PlaceBetween") and self.Anchor then
-						self.Anchor2 = self._currentSelection :: BasePart
-						self._anchor2ObjectNormal = self._lastObjectNormal
-						self._anchor2AlignmentCFrame = part.CFrame * cornerHighlight.CFrame
-						if self.Anchor2 then
-							self._ApplyManipulation()
-						else
-							self.OnSelectionChanged:FireDeferred()
-						end
-						self._currentSelection = nil
-						return
-					end
-
-					-- Set anchor selection state.
-					self.Anchor = part
-					self._anchorObjectNormal = self._lastObjectNormal
-					self._anchorAlignmentCFrame = part.CFrame * cornerHighlight.CFrame
-				end
-
-				if self.Anchor and not SettingsService.Get("PlaceBetween") then
-					-- Both selections have been made, apply the manipulation.
-					self._ApplyManipulation()
-				else
-					self.OnSelectionChanged:FireDeferred()
-				end
-				self._currentSelection = nil
-			end))
-		end
-
-		-- Handle updating highlight sizes.
-		highlightTrove:Add(RunService.Heartbeat:Connect(function()
-			for _, edgeHighlight in edgeHighlights do
-				HighlightHelper.UpdateEdgeHighlightSize(edgeHighlight)
-			end
-			for _, cornerHighlight in cornerHighlights do
-				HighlightHelper.UpdateCornerHighlightSize(cornerHighlight)
-			end
-		end))
-	end
-
-	-- Handle color updating when changing the contrast setting.
-	highlightTrove:Add(SettingsService.OnSettingChanged:Connect(function(settingName)
-		if settingName ~= "ContrastPartHighlighting" then
-			return
-		end
-
-		local highlightColors = SelectionService._GetHighlightColors(part)
-		surfaceHighlight.Color = highlightColors.Surface
-		if edgeHighlights and cornerHighlights then
-			for _, edgeHighlight in edgeHighlights do
-				if self._lastHighlight == edgeHighlight then
-					edgeHighlight.Color3 = highlightColors.Hover
-				else
-					edgeHighlight.Color3 = highlightColors.Edge
-				end
-			end
-			for _, cornerHighlight in cornerHighlights do
-				if self._lastHighlight == cornerHighlight then
-					cornerHighlight.Color3 = highlightColors.Hover
-				else
-					cornerHighlight.Color3 = highlightColors.Corner
-				end
-			end
-		end
-	end))
-	return highlightTrove
+	return "NearestModel"
 end
 
-function SelectionService._GetHighlightColors(part: BasePart): {
-	Surface: Color3,
-	Edge: Color3,
-	Corner: Color3,
-	Hover: Color3,
-	Part: Color3,
-}
-	local surfaceColor
-	local edgeColor
-	local cornerColor
-	local hoverHighlightColor
-	local selectionBoxColor
-	if SettingsService.Get("ContrastPartHighlighting") then
-		selectionBoxColor = ColorHelper.GetContrastingColor({ part.Color }, HighlightHelper.HIGHLIGHT_COLORS.Part, 30)
-		surfaceColor = ColorHelper.GetContrastingColor({ part.Color }, HighlightHelper.HIGHLIGHT_COLORS.Surface, 20)
-		edgeColor = ColorHelper.GetContrastingColor({ part.Color, surfaceColor }, HighlightHelper.HIGHLIGHT_COLORS.Edge)
-		cornerColor = ColorHelper.GetContrastingColor(
-			{ part.Color, surfaceColor, edgeColor },
-			HighlightHelper.HIGHLIGHT_COLORS.Corner
-		)
-		hoverHighlightColor = ColorHelper.GetContrastingColor(
-			{ part.Color, surfaceColor, edgeColor, cornerColor },
-			HighlightHelper.HIGHLIGHT_COLORS.Surface
-		)
-	else
-		surfaceColor = HighlightHelper.HIGHLIGHT_COLORS.Surface[1]
-		edgeColor = HighlightHelper.HIGHLIGHT_COLORS.Edge[1]
-		cornerColor = HighlightHelper.HIGHLIGHT_COLORS.Corner[1]
-		hoverHighlightColor = HighlightHelper.HIGHLIGHT_COLORS.Edge[2]
-	end
-	return {
-		Surface = surfaceColor,
-		Edge = edgeColor,
-		Corner = cornerColor,
-		Hover = hoverHighlightColor,
-		Part = selectionBoxColor,
-	}
-end
-
-function SelectionService._ApplyManipulation()
-	local target = self.Target
-	local anchor = self.Anchor
-	local targetObjectNormal = self._targetObjectNormal
-	local anchorObjectNormal = self._anchorObjectNormal
-	if not target or not anchor or not targetObjectNormal or not anchorObjectNormal then
-		self._ClearSelection(false)
-		return
-	end
-
-	if SettingsService.Get("AlignTo") then
-		local modeFunction = AlignTo.AttemptAlign
-		local translations = RunWithUndo(
-			modeFunction,
-			target,
-			anchor,
-			targetObjectNormal,
-			anchorObjectNormal,
-			self._targetAlignmentCFrame,
-			self._anchorAlignmentCFrame
-		) :: { Method1: Vector3, Method2: Vector3 }?
-		if translations then
-			self._alignmentMethodSelectionEnabled = true
-			self._alignmentTarget = target
-			self._possibleAlignments = translations
-			self._alignmentBoundingBoxes = self._CreateAlignmentBoundingBoxes()
-			self._methodLabel = script.Parent.Parent.Parent.Assets.Ui.MethodLabel:Clone()
-		end
-	elseif SettingsService.Get("SetTo") then
-		RunWithUndo(SetTo, target, anchor)
-	elseif SettingsService.Get("AttachTo") then
-		RunWithUndo(
-			AttachTo,
-			target,
-			anchor,
-			targetObjectNormal,
-			anchorObjectNormal,
-			self._targetAlignmentCFrame,
-			self._anchorAlignmentCFrame
-		)
-	elseif SettingsService.Get("ResizeTo") then
-		RunWithUndo(
-			ResizeTo,
-			target,
-			anchor,
-			targetObjectNormal,
-			anchorObjectNormal,
-			self._targetAlignmentCFrame,
-			self._anchorAlignmentCFrame
-		)
-	elseif SettingsService.Get("PlaceBetween") then
-		RunWithUndo(
-			PlaceBetween,
-			target,
-			anchor,
-			self.Anchor2,
-			targetObjectNormal,
-			anchorObjectNormal,
-			self._anchor2ObjectNormal,
-			self._targetAlignmentCFrame,
-			self._anchorAlignmentCFrame,
-			self._anchor2AlignmentCFrame
-		)
-	end
-	self._ClearSelection(self._alignmentBoundingBoxes == nil)
-end
-
-function SelectionService._CreateAlignmentBoundingBoxes(): AlignmentBoundingBoxes?
-	local target = self.Target
-	local possibleAlignments = self._possibleAlignments
-	if not target or not possibleAlignments then
+-- Where the cursor is on screen, derived by projecting a point along the mouse's own ray. Going through the
+-- camera's projection this way guarantees the result lines up with WorldToViewportPoint, which is what handle
+-- hit testing compares against.
+function SelectionService._GetScreenPoint(): Vector2?
+	const camera = Workspace.CurrentCamera
+	const mouse = self._mouse
+	if not camera or not mouse then
 		return nil
 	end
 
-	-- Create highlights.
-	local highlight = Instance.new("Highlight")
-	highlight.FillColor = Color3.fromRGB(255, 0, 0)
-	highlight.OutlineColor = Color3.fromRGB(0, 0, 0)
-	highlight.OutlineTransparency = 0
-	highlight.FillTransparency = 0.75
-	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-
-	-- Create bounding box container.
-	local boundingBoxes = Instance.new("Model") :: AlignmentBoundingBoxes
-	boundingBoxes.Name = "AlignmentBoundingBoxes"
-
-	-- Create bounding box 1.
-	local box1 = target:Clone()
-	box1.Name = "Method1"
-	box1:ClearAllChildren()
-	box1.Transparency = 0
-	box1.CollisionGroup = "StudioUnselectable"
-	box1.CFrame = target.CFrame + possibleAlignments.Method1
-	highlight.Adornee = box1
-	highlight.Parent = box1
-	box1.Parent = boundingBoxes
-
-	-- Create bounding box 2.
-	local box2 = box1:Clone() :: BasePart & { Highlight: Highlight }
-	box2.Name = "Method2"
-	box2.CFrame = target.CFrame + possibleAlignments.Method2
-	box2.Highlight.Adornee = box2
-	box2.Parent = boundingBoxes
-	boundingBoxes.Parent = Workspace.CurrentCamera
-	return boundingBoxes
+	const ray = mouse.UnitRay
+	const projected = camera:WorldToViewportPoint(ray.Origin + (ray.Direction * 10))
+	return Vector2.new(projected.X, projected.Y)
 end
 
-function SelectionService._ClearSelection(clearAlignmentMethod: boolean)
-	-- Reset hover related state.
-	self._lastSelection = nil
-	self._lastHighlight = nil
-	self._lastObjectNormal = nil
-	if self._currentHighlightTrove then
-		self._trove:Remove(self._currentHighlightTrove)
-		self._currentHighlightTrove = nil
-	end
-	self._surfaceHighlight = nil
+function SelectionService._GetRaycastParams(extraExclusions: { Instance }?): RaycastParams
+	const mode = ModeHelper.GetActiveMode()
+	const isTargetSlot = #self.Picks == 0
+	const params = RaycastParams.new()
 
-	-- Reset selection related state.
-	self.Target = nil
-	self.Anchor = nil
-	self._hoveringOverEdgeOrCorner = false
-	self._currentSelection = nil
-	self._targetObjectNormal = nil
-	self._anchorObjectNormal = nil
-	self._targetAlignmentCFrame = nil
-	self._anchorAlignmentCFrame = nil
-
-	-- Reset alignment method selection related state.
-	if clearAlignmentMethod then
-		self._alignmentMethodSelectionEnabled = false
-		self._alignmentTarget = nil
-		self._possibleAlignments = nil
-		if self._alignmentBoundingBoxes then
-			pcall(game.Destroy, self._alignmentBoundingBoxes)
-			self._alignmentBoundingBoxes = nil
-		end
-		if self._methodLabel then
-			pcall(game.Destroy, self._methodLabel)
-			self._methodLabel = nil
-		end
-		self._lastSelectedMethod = nil
-		self._selectedAlignmentMethod = nil
+	-- Everything the plugin draws lives under the camera, so excluding it in one go keeps highlights, markers
+	-- and ghosts out of selection rays even when brute force querying is on.
+	const exclusions: { Instance } = { Workspace.CurrentCamera }
+	if extraExclusions then
+		table.move(extraExclusions, 1, #extraExclusions, #exclusions + 1, exclusions)
 	end
 
-	-- Reset place between related state.
-	self._anchor2 = nil
-	self._anchor2ObjectNormal = nil
-	self._anchor2AlignmentCFrame = nil
+	const target = self.Picks[1]
+	if target then
+		-- The thing being moved is never a valid anchor for itself.
+		table.insert(exclusions, target.Part)
 
-	-- Fire event for propagation.
+		-- Skipping the rest of the target's model is what stops an align from referencing the very model it is
+		-- about to move. Modes that work inside a single model turn it off, and asking for parts only lifts it
+		-- too, since at that point no model is being moved for it to protect.
+		const filtersModel = mode.FiltersSubjectModel and not InputService.PartOnlyHeld
+		if filtersModel and target.Subject:IsA("Model") then
+			table.insert(exclusions, target.Subject)
+		end
+	end
+
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = exclusions
+	params.BruteForceAllSlow = SettingsService.Get(
+		if isTargetSlot then "NoCanCollideQueryTargetSelectable" else "NoCanCollideQueryAnchorSelectable"
+	)
+	params.IgnoreWater = true
+	return params
+end
+
+-- Casts into the scene, seeing through anything the current settings say is not selectable. Previously a
+-- locked part simply blocked the ray, which made anything behind it unreachable.
+function SelectionService._Raycast(): RaycastResult?
+	const camera = Workspace.CurrentCamera
+	const mouse = self._mouse
+	if not camera or not mouse then
+		return nil
+	end
+
+	const allowLocked =
+		SettingsService.Get(if #self.Picks == 0 then "LockedTargetPartsSelectable" else "LockedAnchorPartsSelectable")
+	const origin = camera.CFrame.Position
+	const direction = mouse.UnitRay.Direction * RAY_LENGTH
+	const skipped: { Instance } = {}
+	for _ = 1, MAXIMUM_RAY_RETRIES do
+		const result = Workspace:Raycast(origin, direction, self._GetRaycastParams(skipped))
+		if not result then
+			return nil
+		end
+
+		-- Terrain is a single part covering the whole place, so its faces, edges and corners describe the world
+		-- bounds rather than anything you could point at. There is nothing any mode could do with it.
+		const isSelectable = not result.Instance:IsA("Terrain") and (allowLocked or not result.Instance.Locked)
+		if isSelectable then
+			return result
+		end
+		table.insert(skipped, result.Instance)
+	end
+	return nil
+end
+
+function SelectionService._GetHighlightColors(part: BasePart): HighlightHelper.Colors
+	const palette = HighlightHelper.HIGHLIGHT_COLORS
+	if not SettingsService.Get("ContrastPartHighlighting") then
+		return {
+			Surface = palette.Surface[1],
+			Edge = palette.Edge[1],
+			Corner = palette.Corner[1],
+			Hover = palette.Hover[1],
+			Outline = OUTLINE_COLOR,
+			Part = palette.Part[1],
+		}
+	end
+
+	const partColor = ColorHelper.GetContrastingColor({ part.Color }, palette.Part, 30)
+	const surface = ColorHelper.GetContrastingColor({ part.Color }, palette.Surface, 20)
+	const edge = ColorHelper.GetContrastingColor({ part.Color, surface }, palette.Edge)
+	const corner = ColorHelper.GetContrastingColor({ part.Color, surface, edge }, palette.Corner)
+	return {
+		Surface = surface,
+		Edge = edge,
+		Corner = corner,
+		-- Deliberately the most distinct color available rather than the first merely acceptable one. A hover
+		-- color that only just clears the threshold against the edge color is indistinguishable in practice,
+		-- which is exactly the case this has to avoid.
+		Hover = ColorHelper.GetMostContrastingColor({ part.Color, surface, edge, corner }, palette.Hover),
+		Outline = OUTLINE_COLOR,
+		Part = partColor,
+	}
+end
+
+function SelectionService._ClearHoverVisuals()
+	if self._surface then
+		HighlightHelper.DestroySurface(self._surface)
+		self._surface = nil
+	end
+	if self._hoverBox then
+		self._hoverBox:Destroy()
+		self._hoverBox = nil
+	end
+end
+
+-- Whether the cursor is still on the face already being hovered, and if so how far away that face is.
+--
+-- Two different things count as still being on it. Sitting over one of its handles counts unconditionally,
+-- because handles are drawn on top of everything: an edge buried inside a wall is plainly visible and has to
+-- stay clickable, so nothing is allowed to steal it. Sitting over the face itself only counts while nothing
+-- has come between the camera and it, since the face is drawn normally and really is hidden.
+function SelectionService._GetStickDistance(
+	hover: Hover,
+	origin: Vector3,
+	direction: Vector3,
+	screenPoint: Vector2
+): (boolean, number)
+	if not hover.Part.Parent then
+		return false, 0
+	end
+
+	if hover.ShowsHandles then
+		const layout = HighlightHelper.ComputeLayout(hover.Part, hover.Basis)
+		if HighlightHelper.HitTest(layout, screenPoint, true, true) then
+			return true, 0 -- Zero so that no depth can outrank it.
+		end
+	end
+
+	const faceDistance = HighlightHelper.GetFaceHitDistance(hover.Part, hover.Basis, origin, direction)
+	return faceDistance ~= nil, faceDistance or 0
+end
+
+function SelectionService._UpdateHover()
+	if self._alignmentChoice then
+		self._UpdateAlignmentChoiceHover()
+		return
+	end
+
+	const camera = Workspace.CurrentCamera
+	const mouse = self._mouse
+	const slot = SelectionService.GetCurrentSlot()
+	const screenPoint = self._GetScreenPoint()
+	const result = if slot then self._Raycast() else nil
+
+	-- Stay on the face already being hovered unless the cursor has left it, or something has come between the
+	-- camera and it. Without this, moving out towards an edge or corner would hop to a neighbouring face (or
+	-- straight past the part) before the handle was ever reachable.
+	const previous = self._hover
+	local stuckPart: BasePart? = nil
+	local stuckBasis: GeometryHelper.FaceBasis? = nil
+	if previous and slot and screenPoint and camera and mouse then
+		const isStillOn, stickDistance =
+			self._GetStickDistance(previous, camera.CFrame.Position, mouse.UnitRay.Direction.Unit, screenPoint)
+		if isStillOn and (not result or result.Distance >= stickDistance - STICKY_DEPTH_TOLERANCE) then
+			stuckPart = previous.Part
+			stuckBasis = previous.Basis
+		end
+	end
+
+	if not slot or not screenPoint or (not result and not stuckPart) then
+		if self._hover then
+			self._hover = nil
+			self.HoverKind = nil
+			self.HoverSubject = nil
+			self._ClearHoverVisuals()
+			self.OnSelectionChanged:FireDeferred()
+		end
+		return
+	end
+
+	const part = stuckPart or (result :: RaycastResult).Instance
+	const mode = ModeHelper.GetActiveMode()
+	const subject = ModelHelper.ResolveSubject(part, SelectionService.GetSubjectScope(mode))
+	const basis = stuckBasis
+		or GeometryHelper.GetFaceBasis(part.Size, part.CFrame:VectorToObjectSpace((result :: RaycastResult).Normal))
+	const showsHandles = ModeHelper.IsSubElementPick(slot, InputService.WholePartHeld)
+
+	-- Resolve which element of the face is under the cursor. Corners beat edges beat the face itself. The
+	-- layout is only worth building when handles are actually in play, since this runs every frame.
+	const layout = if showsHandles then HighlightHelper.ComputeLayout(part, basis) else nil
+	local element: GeometryHelper.Element
+	local elementIndex: number? = nil
+	if layout then
+		const hit, index = HighlightHelper.HitTest(layout, screenPoint, true, true)
+		element = if hit then hit.Element else GeometryHelper.GetFaceElement(basis)
+		elementIndex = index
+	else
+		element = GeometryHelper.GetPartElement(basis)
+	end
+
+	-- Contrasting colors are expensive to work out, so they are kept for as long as the hovered part and the
+	-- setting that produced them both hold.
+	const isContrasting = SettingsService.Get("ContrastPartHighlighting")
+	local isSamePart = false
+	local isSameFace = false
+	local reusableColors: HighlightHelper.Colors? = nil
+	if previous then
+		isSamePart = previous.Part == part
+		isSameFace = isSamePart and previous.Basis.Normal == basis.Normal
+		if isSamePart and previous.ColorsAreContrasting == isContrasting then
+			reusableColors = previous.Colors
+		end
+	end
+	const colors = reusableColors or self._GetHighlightColors(part)
+
+	-- Outline whatever a click would actually move, always, in the color of the slot it would fill. Without it
+	-- there is no way to tell from the viewport whether a click takes the part, the model around it, or the
+	-- outermost model, which is exactly what the scope modifiers change under you.
+	const slotColor = Color3.fromHex(slot.Color)
+	if
+		previous == nil
+		or previous.Subject ~= subject
+		or previous.SlotColor ~= slotColor
+		or previous.ShowsHandles ~= showsHandles
+	then
+		if self._hoverBox then
+			self._hoverBox:Destroy()
+		end
+		self._hoverBox = HighlightHelper.CreateBox(subject, slotColor, not showsHandles)
+	end
+
+	-- Only rebuild the handles when the shape of what is drawn actually changes; otherwise just resize them so
+	-- they hold their on screen size as the camera moves.
+	const needsRebuild = previous == nil or previous.ShowsHandles ~= showsHandles or not isSameFace
+	if needsRebuild then
+		if self._surface then
+			HighlightHelper.DestroySurface(self._surface)
+			self._surface = nil
+		end
+		if layout then
+			self._surface = HighlightHelper.CreateSurface(layout, true, true)
+		end
+	elseif self._surface and layout then
+		HighlightHelper.UpdateSurface(self._surface, layout)
+	end
+
+	if self._surface then
+		HighlightHelper.ColorSurface(self._surface, colors, element.Kind, elementIndex)
+	end
+
+	const changed = previous == nil
+		or previous.Part ~= part
+		or previous.Subject ~= subject
+		or previous.ShowsHandles ~= showsHandles
+		or previous.Element.Kind ~= element.Kind
+		or previous.ElementIndex ~= elementIndex
+		or previous.Basis.Normal ~= basis.Normal
+	self._hover = {
+		Part = part,
+		Subject = subject,
+		Basis = basis,
+		Layout = layout,
+		Element = element,
+		ElementIndex = elementIndex,
+		Colors = colors,
+		ColorsAreContrasting = isContrasting,
+		SlotColor = slotColor,
+		ShowsHandles = showsHandles,
+	}
+	self.HoverKind = element.Kind
+	self.HoverSubject = subject
+	if changed then
+		self.OnSelectionChanged:FireDeferred()
+	end
+end
+
+function SelectionService._CommitPick(hover: Hover)
+	const mode = ModeHelper.GetActiveMode()
+	const pick = PickHelper.Create(
+		hover.Part,
+		hover.Subject,
+		hover.Basis.Normal,
+		hover.Element,
+		hover.ElementIndex,
+		SettingsService.Get("RespectPartPivot")
+	)
+	table.insert(self.Picks, pick)
+	self._ClearHoverVisuals()
+	self._hover = nil
+	self.HoverKind = nil
+	self.HoverSubject = nil
+
+	if #self.Picks >= #mode.Slots then
+		self._Apply(mode)
+		return
+	end
+
+	self._RebuildCommittedVisuals()
+	self.OnSelectionChanged:FireDeferred()
+end
+
+-- Draws an outline (and a point marker for sub-element picks) for everything selected so far.
+function SelectionService._RebuildCommittedVisuals()
+	if self._committedTrove then
+		self._committedTrove:Destroy()
+		self._committedTrove = nil
+	end
+	if #self.Picks == 0 then
+		return
+	end
+
+	const trove = Trove.new()
+	const mode = ModeHelper.GetActiveMode()
+	for index, pick in self.Picks do
+		const slot = mode.Slots[index]
+		if not slot then
+			continue
+		end
+
+		const color = Color3.fromHex(slot.Color)
+		trove:Add(HighlightHelper.CreateBox(pick.Subject, color, pick.Kind == "Part"))
+		if pick.Kind ~= "Part" then
+			const marker = trove:Add(HighlightHelper.CreateMarker(pick.Point, color)) :: Part
+			trove:Add(RunService.Heartbeat:Connect(function()
+				HighlightHelper.UpdateMarker(marker)
+			end))
+		end
+	end
+	self._committedTrove = trove
+end
+
+function SelectionService._Apply(mode: Mode)
+	const target = self.Picks[1]
+	const anchor = self.Picks[2]
+	if not target or not anchor then
+		self.Clear()
+		return
+	end
+
+	if mode.Name == "AlignTo" then
+		const translations = RunWithUndo(AlignTo.Run, target, anchor) :: AlignTo.Translations?
+		if translations then
+			self._BeginAlignmentChoice(target, translations)
+			return
+		end
+	elseif mode.Name == "AttachTo" then
+		RunWithUndo(AttachTo, target, anchor)
+	elseif mode.Name == "PointAt" then
+		RunWithUndo(PointAt, target, anchor)
+	elseif mode.Name == "ResizeTo" then
+		RunWithUndo(ResizeTo, target, anchor, InputService.ExtendPastHeld)
+	elseif mode.Name == "SetTo" then
+		RunWithUndo(SetTo, target, anchor)
+	elseif mode.Name == "PlaceBetween" then
+		const secondAnchor = self.Picks[3]
+		if secondAnchor then
+			RunWithUndo(PlaceBetween, target, anchor, secondAnchor)
+		end
+	end
+	self._FinishAction()
+end
+
+-- Resets for the next action, optionally holding on to the target so several operations can be chained
+-- against the same object without reselecting it every time.
+function SelectionService._FinishAction()
+	const target = self.Picks[1]
+	self.Clear()
+	if target and SettingsService.Get("KeepTargetAfterAction") and target.Part.Parent then
+		-- Rebuilt rather than reused, since the action may have moved or resized the part out from under the
+		-- object space element the original pick was described by.
+		table.insert(self.Picks, PickHelper.Refresh(target, SettingsService.Get("RespectPartPivot")))
+		self._RebuildCommittedVisuals()
+		self.OnSelectionChanged:FireDeferred()
+	end
+end
+
+function SelectionService._BeginAlignmentChoice(target: Pick, translations: AlignTo.Translations)
+	const ghosts = Instance.new("Model")
+	ghosts.Name = "QDT_AlignmentPlusPlusAlignmentGhosts"
+	ghosts.Archivable = false
+
+	const function CreateGhost(name: string, translation: Vector3): BasePart
+		local ghost: BasePart
+		if target.Subject:IsA("Model") then
+			const boundingCFrame, size = target.Subject:GetBoundingBox()
+			ghost = Instance.new("Part")
+			ghost.Size = size
+			ghost.CFrame = boundingCFrame + translation
+		else
+			ghost = (target.Subject :: BasePart):Clone()
+			ghost:ClearAllChildren()
+			ghost.CFrame = (target.Subject :: BasePart).CFrame + translation
+		end
+		ghost.Name = name
+		ghost.Anchored = true
+		ghost.Archivable = false
+		ghost.CanCollide = false
+		-- A ghost cloned from the target inherits its CanQuery, and these have to stay queryable or the ray
+		-- that works out which one is being hovered would pass straight through them.
+		ghost.CanQuery = true
+		ghost.CanTouch = false
+		ghost.CastShadow = false
+		ghost.CollisionGroup = "StudioUnselectable"
+		ghost.Locked = false
+		-- Highlights do not draw over a fully transparent part, and a ghost cloned from the target inherits
+		-- whatever transparency that had, so it is pinned opaque here.
+		ghost.Transparency = 0
+
+		const highlight = Instance.new("Highlight")
+		highlight.Adornee = ghost
+		highlight.FillColor = GHOST_UNCHOSEN_COLOR
+		highlight.OutlineColor = Color3.fromRGB(0, 0, 0)
+		highlight.OutlineTransparency = 0
+		highlight.FillTransparency = 0.75
+		highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		highlight.Parent = ghost
+		ghost.Parent = ghosts
+		return ghost
+	end
+
+	CreateGhost("AlongNormal", translations.AlongNormal)
+	CreateGhost("NearestAxis", translations.NearestAxis)
+	ghosts.Parent = Workspace.CurrentCamera
+
+	self._alignmentChoice = {
+		Target = target,
+		Translations = translations,
+		Ghosts = ghosts,
+		Label = script.Parent.Parent.Parent.Assets.Ui.MethodLabel:Clone(),
+		Hovered = nil,
+	}
+	self.OnSelectionChanged:FireDeferred()
+end
+
+function SelectionService._UpdateAlignmentChoiceHover()
+	const choice = self._alignmentChoice :: AlignmentChoice
+	const camera = Workspace.CurrentCamera
+	const mouse = self._mouse
+	if not camera or not mouse then
+		return
+	end
+
+	const params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Include
+	params.FilterDescendantsInstances = { choice.Ghosts }
+	const result = Workspace:Raycast(camera.CFrame.Position, mouse.UnitRay.Direction * RAY_LENGTH, params)
+	const hovered = if result then result.Instance else nil
+	if hovered == choice.Hovered then
+		return
+	end
+
+	choice.Hovered = hovered
+	for _, ghost in choice.Ghosts:GetChildren() do
+		const highlight = ghost:FindFirstChildOfClass("Highlight")
+		if highlight then
+			highlight.FillColor = if ghost == hovered then GHOST_CHOSEN_COLOR else GHOST_UNCHOSEN_COLOR
+		end
+	end
+
+	if hovered then
+		choice.Label.Method.Method.Text = if hovered.Name == "AlongNormal" then "Along Normal" else "Nearest Axis"
+		choice.Label.Parent = hovered
+	else
+		choice.Label.Parent = nil
+	end
+end
+
+function SelectionService._ChooseAlignment()
+	const choice = self._alignmentChoice :: AlignmentChoice
+	const hovered = choice.Hovered
+	if not hovered then
+		self.Clear()
+		return
+	end
+
+	const translation = if hovered.Name == "AlongNormal"
+		then choice.Translations.AlongNormal
+		else choice.Translations.NearestAxis
+	RunWithUndo(AlignTo.Align, choice.Target, translation)
+	self._ClearAlignmentChoice()
+	self._FinishAction()
+end
+
+function SelectionService._ClearAlignmentChoice()
+	const choice = self._alignmentChoice
+	if not choice then
+		return
+	end
+
+	choice.Label.Parent = nil
+	pcall(game.Destroy, choice.Label)
+	pcall(game.Destroy, choice.Ghosts)
+	self._alignmentChoice = nil
+end
+
+function SelectionService.Clear()
+	self._ClearAlignmentChoice()
+	self._ClearHoverVisuals()
+	if self._committedTrove then
+		self._committedTrove:Destroy()
+		self._committedTrove = nil
+	end
+
+	self._hover = nil
+	self.HoverKind = nil
+	self.HoverSubject = nil
+	self._pressed = nil
+	table.clear(self.Picks)
 	self.OnSelectionChanged:FireDeferred()
 end
 

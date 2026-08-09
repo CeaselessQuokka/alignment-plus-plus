@@ -1,5 +1,5 @@
 --!strict
---- Types ---
+-- Types --
 export type InstanceName = string
 export type InstanceClassName = string
 export type InstanceSuperclassName = string
@@ -23,7 +23,7 @@ type Extension = {
 	ShouldConstruct: (component: Component) -> boolean,
 }
 
---- HierarchyIs Component Extension ---
+-- HierarchyIs Component Extension --
 --[[
 
 	Elevator Hierarchy Example:
@@ -72,7 +72,7 @@ return function(hierarchy: Hierarchy): Extension
 
 				if data.Children then
 					for name: string, childData: HierarchyData in data.Children :: any do
-						local child = instance:FindFirstChild(name)
+						const child = instance:FindFirstChild(name)
 						assert(child ~= nil, `[{component.Tag} ({instance:GetFullName()})] Missing child: "{name}"`)
 						ValidateHierarchy(childData, child)
 					end

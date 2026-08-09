@@ -1,24 +1,23 @@
 --!strict
---- Imports ---
-local SettingsService = require(script.Parent.Parent.Parent.Services.SettingsService)
-local WidgetService = require(script.Parent.Parent.Parent.Services.WidgetService)
+-- Imports --
+const SettingsService = require(script.Parent.Parent.Parent.Services.SettingsService)
+const WidgetService = require(script.Parent.Parent.Parent.Services.WidgetService)
 
---- Types ---
+-- Types --
 export type RadioGroup = string
 type SettingName = SettingsService.SettingName
-type SettingValue = SettingsService.SettingValue
 
---- Settings Handler ---
-local SettingsHandler = {
-	--- Boilerplate
+-- Settings Handler --
+const SettingsHandler = {
+	-- Boilerplate
 	Initialized = false,
 	Started = false,
 
-	--- Handler Specific
+	-- Handler Specific
 	_radioButtons = {} :: { [RadioGroup]: { Default: SettingName?, Buttons: { SettingName } } },
 	_widget = nil :: WidgetService.Widget,
 }
-local self = SettingsHandler
+const self = SettingsHandler
 
 function SettingsHandler.Init()
 	assert(not SettingsHandler.Initialized, `{script.Name} was already initialized`)
@@ -31,7 +30,7 @@ function SettingsHandler.Start()
 	assert(self.Initialized, `{script.Name} was not initialized`)
 	assert(not self.Started, `{script.Name} was already started`)
 
-	self._widget.Main.Tooltip.Scroller.Tip.Text = ""
+	self.HideTooltip()
 	self.Started = true
 end
 
@@ -54,18 +53,20 @@ function SettingsHandler.RegisterRadioButton(name: SettingName, group: RadioGrou
 	table.insert(groupData.Buttons, name)
 end
 
-function SettingsHandler.UpdateRadioSelection(name: SettingName, value: SettingValue, group: RadioGroup)
-	local groupData = self._radioButtons[group]
-	for _, buttonName: SettingName in groupData.Buttons do
-		SettingsService.Set(buttonName, false)
+-- Selects one button in a group and clears the rest. Selecting the button that is already active does nothing,
+-- since a radio group always has to have exactly one thing chosen.
+function SettingsHandler.UpdateRadioSelection(name: SettingName, group: RadioGroup)
+	if SettingsService.Get(name) then
+		return
 	end
-	if value then
-		SettingsService.Set(name, true)
-	else
-		if groupData.Default then
-			SettingsService.Set(groupData.Default, true)
+
+	const groupData = self._radioButtons[group]
+	for _, buttonName: SettingName in groupData.Buttons do
+		if buttonName ~= name then
+			SettingsService.Set(buttonName, false)
 		end
 	end
+	SettingsService.Set(name, true)
 end
 
 function SettingsHandler.ToggleTooltip(tip: string)
@@ -77,13 +78,13 @@ function SettingsHandler.ToggleTooltip(tip: string)
 end
 
 function SettingsHandler.ShowTooltip(tip: string)
-	local tooltip = self._widget.Main.Tooltip
+	const tooltip = self._widget.Main.Tooltip
 	tooltip.Visible = true
 	tooltip.Scroller.Tip.Text = tip
 end
 
 function SettingsHandler.HideTooltip()
-	local tooltip = self._widget.Main.Tooltip
+	const tooltip = self._widget.Main.Tooltip
 	tooltip.Visible = false
 	tooltip.Scroller.Tip.Text = ""
 end

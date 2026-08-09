@@ -1,19 +1,20 @@
 --!strict
---- Imports ---
-local Component = require(script.Parent.Parent.Parent.Packages.Component)
-local Trove = require(script.Parent.Parent.Parent.Packages.Trove)
-local t = require(script.Parent.Parent.Parent.Packages.t)
+-- Imports --
+const Component = require(script.Parent.Parent.Parent.Packages.Component)
+const Trove = require(script.Parent.Parent.Parent.Packages.Trove)
+const t = require(script.Parent.Parent.Parent.Packages.t)
 
-local SettingsService = require(script.Parent.Parent.Parent.Services.SettingsService)
-local WidgetService = require(script.Parent.Parent.Parent.Services.WidgetService)
+const SettingsService = require(script.Parent.Parent.Parent.Services.SettingsService)
+const WidgetService = require(script.Parent.Parent.Parent.Services.WidgetService)
 
-local AttributeHelper = require(script.Parent.Parent.Parent.Helpers.AttributeHelper)
-local ThemeHelper = require(script.Parent.Parent.Parent.Helpers.ThemeHelper)
+const AttributeHelper = require(script.Parent.Parent.Parent.Helpers.AttributeHelper)
+const ThemeHelper = require(script.Parent.Parent.Parent.Helpers.ThemeHelper)
+const VisibilityHelper = require(script.Parent.Parent.Parent.Helpers.VisibilityHelper)
 
-local HierarchyIs = require(script.Parent.Parent.Parent.ComponentExtensions.HierarchyIs)
+const HierarchyIs = require(script.Parent.Parent.Parent.ComponentExtensions.HierarchyIs)
 
---- Types ---
-type ComponentInstance = GuiObject & {
+-- Types --
+type ComponentInstance = GuiButton & {
 	Break: Frame,
 	ToggleExpansion: TextButton,
 	Title: TextLabel,
@@ -25,22 +26,20 @@ type Component = {
 
 	_categoryName: SettingName,
 	_settingsInCategory: { SettingName },
-	_dimIfEnabled: { [SettingName]: boolean },
-	_dimIfDisabled: { [SettingName]: boolean },
 
+	_Toggle: (self: Component) -> (),
 	_Update: (self: Component) -> (),
-	_UpdateDimming: (self: Component) -> (),
 }
 
 type SettingName = SettingsService.SettingName
 
---- Category UI Component ---
-local CategoryUi = Component.new({
+-- Category UI Component --
+const CategoryUi = Component.new({
 	Tag = "CategoryUi",
 	Ancestors = { (WidgetService.Widget :: any) :: Instance },
 	Extensions = {
 		HierarchyIs({
-			IsA = "GuiObject",
+			IsA = "GuiButton",
 			Children = {
 				Break = {
 					IsA = "GuiObject",
@@ -56,17 +55,14 @@ local CategoryUi = Component.new({
 	} :: any,
 })
 
-local tSettingName = t.keyOf(SettingsService._settings)
+const tSettingName = t.keyOf(SettingsService._settings)
 function CategoryUi.Construct(self: Component)
 	self._trove = Trove.new()
 
 	assert(tSettingName(self.Instance.Name), `Invalid Category name, got "{self.Instance.Name}"`)
 	self._categoryName = self.Instance.Name :: SettingName
-	self._settingsInCategory = AttributeHelper.GetAsArray(self.Instance, "Settings", tSettingName) :: { SettingName }
-	self._dimIfEnabled =
-		AttributeHelper.GetAsSet(self.Instance, "DimIfEnabled", tSettingName) :: { [SettingName]: boolean }
-	self._dimIfDisabled =
-		AttributeHelper.GetAsSet(self.Instance, "DimIfDisabled", tSettingName) :: { [SettingName]: boolean }
+	self._settingsInCategory =
+		AttributeHelper.GetAsArray(self.Instance, "Settings", true, tSettingName) :: { SettingName }
 end
 
 function CategoryUi.Start(self: Component)
@@ -75,62 +71,61 @@ function CategoryUi.Start(self: Component)
 		self:_Update()
 	end))
 
-	-- Handle expansion toggle functionality.
+	-- Handle expansion toggle functionality, from the arrow or from anywhere along the header.
 	self._trove:Add(self.Instance.ToggleExpansion.Activated:Connect(function()
-		SettingsService.Toggle(self._categoryName)
+		self:_Toggle()
+	end))
+	self._trove:Add(self.Instance.Activated:Connect(function()
+		self:_Toggle()
+	end))
+
+	-- The category owns the visibility of every row inside it, and a row's rules can depend on any setting, so
+	-- every change is re-evaluated rather than trying to track which settings matter to which row.
+	self._trove:Add(SettingsService.OnSettingChanged:Connect(function()
 		self:_Update()
-		WidgetService.PlaySound("CategoryExpansionToggleSound")
 	end))
 	task.defer(self._Update, self)
-
-	-- Handle dimming functionality.
-	self._trove:Add(SettingsService.OnSettingChanged:Connect(function(settingName)
-		if self._dimIfEnabled[settingName] or self._dimIfDisabled[settingName] then
-			self:_UpdateDimming()
-		end
-	end))
 end
 
 function CategoryUi.Stop(self: Component)
 	self._trove:Destroy()
 end
 
-function CategoryUi._Update(self: Component)
-	-- Update expansion visuals.
-	local isExpanded = SettingsService.Get(self._categoryName) :: boolean
-	self.Instance.ToggleExpansion.Text = if isExpanded then "↑" else "↓"
-	self.Instance.Break.Visible = isExpanded
-	self:_UpdateDimming()
-
-	-- Update visibility of settings in this category.
-	local widget = WidgetService.Widget :: WidgetService.Widget
-	for _, settingName in self._settingsInCategory do
-		(widget.Main.Settings:FindFirstChild(settingName) :: GuiObject).Visible = isExpanded
-	end
+function CategoryUi._Toggle(self: Component)
+	SettingsService.Toggle(self._categoryName)
+	self:_Update()
+	WidgetService.PlaySound("CategoryExpansionToggleSound")
 end
 
-function CategoryUi._UpdateDimming(self: Component)
-	local isExpanded = SettingsService.Get(self._categoryName)
-	if not isExpanded then
-		self.Instance.Title.TextColor3 = ThemeHelper.GetColor(Enum.StudioStyleGuideColor.DimmedText)
-		return
-	end
+function CategoryUi._Update(self: Component)
+	const widget = WidgetService.Widget :: WidgetService.Widget
+	const isCategoryVisible = VisibilityHelper.ShouldShow(self.Instance)
+	const isExpanded = SettingsService.Get(self._categoryName)
 
-	for settingName: SettingName in self._dimIfEnabled do
-		if SettingsService.Get(settingName) then
-			self.Instance.Title.TextColor3 = ThemeHelper.GetColor(Enum.StudioStyleGuideColor.DimmedText)
-			return
+	-- Update visibility of the settings in this category.
+	local visibleSettings = 0
+	for _, settingName in self._settingsInCategory do
+		const row = widget.Main.Settings:FindFirstChild(settingName) :: GuiObject?
+		if not row then
+			continue
 		end
-	end
 
-	for settingName: SettingName in self._dimIfDisabled do
-		if not SettingsService.Get(settingName) then
-			self.Instance.Title.TextColor3 = ThemeHelper.GetColor(Enum.StudioStyleGuideColor.DimmedText)
-			return
+		const isRowRelevant = isCategoryVisible and VisibilityHelper.ShouldShow(row)
+		if isRowRelevant then
+			visibleSettings += 1
 		end
+		row.Visible = isRowRelevant and isExpanded
 	end
 
-	self.Instance.Title.TextColor3 = ThemeHelper.GetColor(Enum.StudioStyleGuideColor.MainText)
+	-- A header with nothing left under it is just noise, so it goes away with its contents.
+	self.Instance.Visible = isCategoryVisible and visibleSettings > 0
+
+	-- Update expansion visuals.
+	self.Instance.ToggleExpansion.Text = if isExpanded then "↑" else "↓"
+	self.Instance.Break.Visible = isExpanded
+	self.Instance.Title.TextColor3 = ThemeHelper.GetColor(
+		if isExpanded then Enum.StudioStyleGuideColor.MainText else Enum.StudioStyleGuideColor.DimmedText
+	)
 end
 
 return CategoryUi

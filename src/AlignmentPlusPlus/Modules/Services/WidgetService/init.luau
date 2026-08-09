@@ -1,29 +1,31 @@
 --!strict
---- Imports ---
-local Trove = require(script.Parent.Parent.Packages.Trove)
+-- Imports --
+const Trove = require(script.Parent.Parent.Packages.Trove)
 
-local ThemeHelper = require(script.Parent.Parent.Helpers.ThemeHelper)
+const SettingsService = require(script.Parent.SettingsService)
 
-local WidgetTypes = require(script.WidgetTypes)
+const ThemeHelper = require(script.Parent.Parent.Helpers.ThemeHelper)
 
---- Types ---
+const WidgetTypes = require(script.WidgetTypes)
+
+-- Types --
 export type Widget = DockWidgetPluginGui & {
 	Sounds: Folder,
 	Main: WidgetTypes.Ui,
 }
 
---- Widget Service ---
-local WidgetService = {
-	--- Boilerplate
+-- Widget Service --
+const WidgetService = {
+	-- Boilerplate
 	Initialized = false,
 	Started = false,
 	_trove = Trove.new(),
 	_plugin = nil :: Plugin?,
 
-	--- Service Specific
+	-- Service Specific
 	Widget = nil :: Widget?,
 }
-local self = WidgetService
+const self = WidgetService
 
 function WidgetService.Init(plugin: Plugin)
 	assert(not self.Initialized, `{script.Name} was already initialized`)
@@ -90,17 +92,28 @@ function WidgetService.Unload()
 	end
 end
 
+function WidgetService.SetShown(shown: boolean)
+	(self.Widget :: Widget).Enabled = shown
+end
+
+function WidgetService.IsShown(): boolean
+	return (self.Widget :: Widget).Enabled
+end
+
 function WidgetService.Show()
-	(self.Widget :: Widget).Enabled = true
+	WidgetService.SetShown(true)
 end
 
 function WidgetService.Hide()
-	(self.Widget :: Widget).Enabled = false
+	WidgetService.SetShown(false)
 end
 
 function WidgetService.PlaySound(soundName: string)
-	local sound = (self.Widget :: Widget).Sounds:FindFirstChild(soundName) :: Sound?
+	const sound = (self.Widget :: Widget).Sounds:FindFirstChild(soundName) :: Sound?
 	assert(sound, `Sound '{soundName}' does not exist`)
+	if not SettingsService.Get("PlaySounds") then
+		return
+	end
 
 	sound:Play()
 end

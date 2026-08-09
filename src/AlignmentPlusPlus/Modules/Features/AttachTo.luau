@@ -1,43 +1,44 @@
 --!strict
---- Imports ---
-local SettingsService = require(script.Parent.Parent.Services.SettingsService)
+-- Imports --
+const SettingsService = require(script.Parent.Parent.Services.SettingsService)
 
-local ModelHelper = require(script.Parent.Parent.Helpers.ModelHelper)
+const GeometryHelper = require(script.Parent.Parent.Helpers.GeometryHelper)
+const ModelHelper = require(script.Parent.Parent.Helpers.ModelHelper)
+const PickHelper = require(script.Parent.Parent.Helpers.PickHelper)
 
---- Functions ---
-local function Attach(target: BasePart, translation: Vector3)
-	-- Attach selected model (or parent/rootmost model), unless PartOnly is enabled.
-	local model = ModelHelper.GetPartModel(target)
-	if model and not SettingsService.Get("PartOnly") then
-		ModelHelper.TranslateModel(target, model, translation)
-	else
-		if SettingsService.Get("RespectPartPivot") then
-			target:PivotTo(target:GetPivot() + translation)
-		else
-			target.Position += translation
-		end
-	end
+-- Types --
+type Pick = PickHelper.Pick
+
+-- Functions --
+-- Half the distance across a subject's bounding box along a world direction.
+const function GetHalfExtentAlong(subject: ModelHelper.Subject, direction: Vector3, respectPartPivot: boolean): number
+	const reference = ModelHelper.GetReferenceCFrame(subject, respectPartPivot)
+	return GeometryHelper.GetExtentAlong(ModelHelper.GetSize(subject), reference:VectorToObjectSpace(direction)) / 2
 end
 
---- Attach To ---
-return function(
-	target: BasePart,
-	anchor: BasePart,
-	targetObjectNormal: Vector3,
-	anchorObjectNormal: Vector3,
-	targetAttachmentCFrame: CFrame?, -- Used if an edge or corner was selected.
-	anchorAttachmentCFrame: CFrame? -- Used if an edge or corner was selected.
-)
-	-- Calculate attachment points.
-	local absTargetObjectNormal = targetObjectNormal:Abs()
-	local targetAttachmentPoint = targetAttachmentCFrame
-		or target.CFrame * CFrame.new(targetObjectNormal * (target.Size:Dot(absTargetObjectNormal) / 2))
-	local anchorAttachmentPoint = anchorAttachmentCFrame
-		or anchor.CFrame * CFrame.new(anchorObjectNormal * (anchor.Size:Dot(anchorObjectNormal:Abs()) / 2))
+-- Attach To --
+return function(target: Pick, anchor: Pick)
+	const respectPartPivot = SettingsService.Get("RespectPartPivot")
+	local destination = anchor.Point
 
-	-- The vector to add to the target's position to get to the anchor attachment point.
-	local vectorToAnchorSurface = anchorAttachmentPoint.Position - targetAttachmentPoint.Position
+	-- A whole object has no surface to meet the anchor with, so its center would end up buried inside whatever
+	-- it was attached to. Backing it off by its own half extent makes the two sit flush instead, which is what
+	-- attaching is supposed to look like.
+	if target.Kind == "Part" then
+		if anchor.Kind == "Part" then
+			-- Neither side picked a surface, so the line joining the two centers is the only contact direction
+			-- there is. Both back off along it rather than ending up sharing a center.
+			const separation = target.Point - anchor.Point
+			if separation.Magnitude > 1e-4 then
+				const contact = separation.Unit
+				const anchorReach = GetHalfExtentAlong(anchor.Subject, contact, respectPartPivot)
+				const targetReach = GetHalfExtentAlong(target.Subject, contact, respectPartPivot)
+				destination += contact * (anchorReach + targetReach)
+			end
+		else
+			destination += anchor.Normal * GetHalfExtentAlong(target.Subject, anchor.Normal, respectPartPivot)
+		end
+	end
 
-	-- Apply attachment.
-	Attach(target, vectorToAnchorSurface)
+	ModelHelper.Translate(target.Subject, destination - target.Point)
 end

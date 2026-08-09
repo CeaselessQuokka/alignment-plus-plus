@@ -1,107 +1,132 @@
 --!strict
---- Imports ---
-local Signal = require(script.Parent.Parent.Packages.Signal)
+-- Imports --
+const Signal = require(script.Parent.Parent.Packages.Signal)
 
---- Types ---
+-- Types --
+-- Listed in the same grouping DEFAULT_SETTINGS uses below: modes, Align To options, Set To options, what a
+-- manipulation moves, selectability, general, and finally the category expansion states.
 export type SettingName =
 	"AlignTo"
 	| "AttachTo"
+	| "PointAt"
 	| "ResizeTo"
 	| "SetTo"
 	| "PlaceBetween"
-	| "ConstrainAligningToOneAxis"
-	| "SelectMethodAfterAlignment"
-	| "AlignInMultipleAxes"
-	| "PartOnly"
-	| "AlignRootmostModel"
-	| "SetPositionOrientationAndSize"
+	| "AlignAlongNormal"
+	| "AlignOnNearestAxis"
+	| "AlignChooseInViewport"
 	| "SetPositionAndOrientation"
+	| "SetPositionOrientationAndSize"
 	| "SetPositionOnly"
 	| "SetOrientationOnly"
 	| "SetSizeOnly"
+	| "SubjectAutoModel"
+	| "SubjectRootmostModel"
+	| "SubjectPartOnly"
 	| "LockedTargetPartsSelectable"
 	| "LockedAnchorPartsSelectable"
 	| "NoCanCollideQueryTargetSelectable"
 	| "NoCanCollideQueryAnchorSelectable"
+	| "AdvancedMode"
 	| "RespectPartPivot"
 	| "ContrastPartHighlighting"
+	| "PlaySounds"
+	| "KeepTargetAfterAction"
+	| "ScaleAttachmentsOnResize"
+	| "ModeOptions"
+	| "AlignToOptions"
+	| "SetToOptions"
+	| "SubjectOptions"
+	| "SelectionOptions"
+	| "GeneralOptions"
 export type SettingValue = boolean
 
-export type Settings = {
-	AlignTo: SettingValue,
-	AttachTo: SettingValue,
-	ResizeTo: SettingValue,
-	SetTo: SettingValue,
-	PlaceBetween: SettingValue,
-	SelectMethodAfterAlignment: SettingValue,
-	ConstrainAligningToOneAxis: SettingValue,
-	AlignInMultipleAxes: SettingValue,
-	PartOnly: SettingValue,
-	AlignRootmostModel: SettingValue,
-	SetPositionOrientationAndSize: SettingValue,
-	SetPositionAndOrientation: SettingValue,
-	SetPositionOnly: SettingValue,
-	SetOrientationOnly: SettingValue,
-	SetSizeOnly: SettingValue,
-	LockedTargetPartsSelectable: SettingValue,
-	LockedAnchorPartsSelectable: SettingValue,
-	NoCanCollideQueryTargetSelectable: SettingValue,
-	NoCanCollideQueryAnchorSelectable: SettingValue,
-	RespectPartPivot: SettingValue,
-	ContrastPartHighlighting: SettingValue,
-}
+-- An indexer rather than a record: settings are almost always reached through a SettingName variable, and
+-- a record type widens that key back to a plain string on the way out.
+export type Settings = { [SettingName]: SettingValue }
 
---- Variables ---
-local SETTINGS_KEY = "QDT_AlignmentPlusPlus"
+-- Variables --
+const SETTINGS_KEY = "QDT_AlignmentPlusPlus"
 
---- Settings Service ---
-local SettingsService = {
-	--- Boilerplate
+-- Every mode, in the order they are offered. Kept here so that other modules never have to ask about each mode
+-- one at a time just to find out which is active.
+const MODE_NAMES: { SettingName } = table.freeze({
+	"AlignTo",
+	"AttachTo",
+	"PointAt",
+	"ResizeTo",
+	"SetTo",
+	"PlaceBetween",
+} :: { SettingName })
+
+const DEFAULT_SETTINGS = {
+	-- Modes.
+	AlignTo = true,
+	AttachTo = false,
+	PointAt = false,
+	ResizeTo = false,
+	SetTo = false,
+	PlaceBetween = false,
+
+	-- Align To options. Sliding along the picked normal is what the original plugin did, and is what almost
+	-- everyone expects, so it leads.
+	AlignAlongNormal = true,
+	AlignOnNearestAxis = false,
+	AlignChooseInViewport = false,
+
+	-- Set To options.
+	SetPositionAndOrientation = true,
+	SetPositionOrientationAndSize = false,
+	SetPositionOnly = false,
+	SetOrientationOnly = false,
+	SetSizeOnly = false,
+
+	-- What a manipulation moves.
+	SubjectAutoModel = true,
+	SubjectRootmostModel = false,
+	SubjectPartOnly = false,
+
+	-- Selectability.
+	LockedTargetPartsSelectable = false,
+	LockedAnchorPartsSelectable = true,
+	NoCanCollideQueryTargetSelectable = true,
+	NoCanCollideQueryAnchorSelectable = true,
+
+	-- General.
+	AdvancedMode = false,
+	RespectPartPivot = false,
+	ContrastPartHighlighting = true,
+	PlaySounds = true,
+	KeepTargetAfterAction = false,
+	ScaleAttachmentsOnResize = true,
+
+	-- Category expansion states.
+	ModeOptions = true,
+	AlignToOptions = true,
+	SetToOptions = true,
+	SubjectOptions = true,
+	SelectionOptions = true,
+	GeneralOptions = true,
+} :: Settings
+
+-- Settings Service --
+const SettingsService = {
+	-- Boilerplate
 	Initialized = false,
 	Started = false,
 	_plugin = nil :: Plugin?,
 
-	--- Service Specific
+	-- Service Specific
 	OnSettingChanged = Signal.new() :: Signal.Signal<SettingName, SettingValue>,
 	OnSettingsSaved = Signal.new() :: Signal.Signal<>,
 
-	_settings = {
-		-- Setting States
-		AlignTo = true,
-		AttachTo = false,
-		ResizeTo = false,
-		SetTo = false,
-		PlaceBetween = false,
-		SelectMethodAfterAlignment = true,
-		ConstrainAligningToOneAxis = false,
-		AlignInMultipleAxes = false,
-		PartOnly = false,
-		AlignRootmostModel = false,
-		SetPositionOrientationAndSize = false,
-		SetPositionAndOrientation = true,
-		SetPositionOnly = false,
-		SetOrientationOnly = false,
-		SetSizeOnly = false,
-		LockedTargetPartsSelectable = false,
-		LockedAnchorPartsSelectable = true,
-		NoCanCollideQueryTargetSelectable = true,
-		NoCanCollideQueryAnchorSelectable = true,
-		RespectPartPivot = false,
-		ContrastPartHighlighting = true,
-
-		-- Category Expansion States
-		AlignToOptions = true,
-		AlignAttachSetToOptions = true,
-		AlignmentMode = true,
-		GeneralOptions = true,
-		AccessibilityOptions = true,
-		SetToOptions = true,
-	} :: Settings,
+	MODE_NAMES = MODE_NAMES,
+	_settings = table.clone(DEFAULT_SETTINGS),
 }
-local self = SettingsService
+const self = SettingsService
 
 function SettingsService.Init(plugin: Plugin)
-	assert(not SettingsService.Initialized, `{script.Name} was already initialized`)
+	assert(not self.Initialized, `{script.Name} was already initialized`)
 
 	self._plugin = plugin
 	self.Initialized = true
@@ -111,26 +136,27 @@ function SettingsService.Start()
 	assert(self.Initialized, `{script.Name} was not initialized`)
 	assert(not self.Started, `{script.Name} was already started`)
 
-	-- Reconcile settings.
-	local savedSettings = (self._plugin :: Plugin):GetSetting(SETTINGS_KEY)
-	if savedSettings ~= nil then
-		for defaultSettingName, defaultSettingValue in self._settings do
-			if savedSettings[defaultSettingName] == nil then
-				savedSettings[defaultSettingName] = defaultSettingValue
-			end
+	-- Reconcile settings. Building a fresh table from the defaults rather than patching the saved one means
+	-- settings that no longer exist are dropped for free, and anything saved as the wrong type is replaced.
+	const savedSettings = (self._plugin :: Plugin):GetSetting(SETTINGS_KEY)
+	if typeof(savedSettings) == "table" then
+		const saved = savedSettings :: { [string]: unknown }
+		const reconciled: { [string]: SettingValue } = {}
+		const defaults = (DEFAULT_SETTINGS :: any) :: { [string]: SettingValue }
+		for settingName, defaultValue in defaults do
+			const savedValue = saved[settingName]
+			reconciled[settingName] = if typeof(savedValue) == "boolean" then savedValue else defaultValue
 		end
+		self._settings = reconciled :: any
+	end
 
-		-- Remove old settings.
-		for savedSettingName in savedSettings do
-			if self._settings[savedSettingName] == nil then
-				savedSettings[savedSettingName] = nil
-			end
-		end
+	-- A save from an older version could leave every mode off, which would strand the plugin with no mode at
+	-- all, so fall back to the default mode when nothing is selected.
+	if not SettingsService.GetActiveMode() then
+		self._settings["AlignTo" :: SettingName] = true
 	end
 
 	-- Update service state.
-	local pluginSettings = savedSettings or self._settings
-	self._settings = pluginSettings
 	self.Started = true
 end
 
@@ -167,9 +193,17 @@ end
 function SettingsService.Toggle(name: SettingName)
 	assert(self._settings[name] ~= nil, `"{name}" ({typeof(name)}) is not a valid setting`)
 
-	self._settings[name] = not self._settings[name]
-	self.OnSettingChanged:FireDeferred(name, self._settings[name])
-	self.Save()
+	self.Set(name, not self._settings[name])
+end
+
+-- The mode currently in use. Returns nil only while settings are mid-reconcile.
+function SettingsService.GetActiveMode(): SettingName?
+	for _, modeName: SettingName in MODE_NAMES do
+		if self._settings[modeName] then
+			return modeName
+		end
+	end
+	return nil
 end
 
 function SettingsService.Save()
