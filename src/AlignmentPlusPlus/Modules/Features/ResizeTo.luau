@@ -2,6 +2,8 @@
 -- Imports --
 const SettingsService = require(script.Parent.Parent.Services.SettingsService)
 
+const GeometryHelper = require(script.Parent.Parent.Helpers.GeometryHelper)
+const ModelHelper = require(script.Parent.Parent.Helpers.ModelHelper)
 const PickHelper = require(script.Parent.Parent.Helpers.PickHelper)
 
 -- Types --
@@ -12,6 +14,13 @@ type Pick = PickHelper.Pick
 -- part's opposite face from drifting when a resize is asked to go too far.
 const MINIMUM_PART_SIZE = 0.05
 const MAXIMUM_PART_SIZE = 2048
+
+-- A procedural model's footprint is not a part and the engine puts no limits on it at all, so these are the
+-- plugin's own. Zero is allowed where a part's size is not, because a footprint that is flat along an axis is
+-- ordinary for a procedural model rather than a degenerate part; the ceiling is only a sanity bound, matching
+-- the one parts are held to.
+const MINIMUM_PROCEDURAL_SIZE = 0
+const MAXIMUM_PROCEDURAL_SIZE = MAXIMUM_PART_SIZE
 
 -- Below this the face being moved is edge on to the anchor's plane and would never meet it, so extending past
 -- is abandoned and the two selections are simply brought together.
@@ -37,8 +46,19 @@ const function GetDistanceAlongAxis(target: Pick, anchor: Pick, direction: Vecto
 	return delta:Dot(direction)
 end
 
--- Resize To --
-return function(target: Pick, anchor: Pick, extendPast: boolean?)
+-- Which of three unsigned axes a snapped axis vector names. Only used to tell two of them apart, so the order
+-- matters no more than that it is consistent.
+const function GetAxisIndex(unsignedAxis: Vector3): number
+	if unsignedAxis.X ~= 0 then
+		return 1
+	elseif unsignedAxis.Y ~= 0 then
+		return 2
+	end
+	return 3
+end
+
+-- Resizes a part, carrying its attachments.
+const function ResizePart(target: Pick, anchor: Pick, extendPast: boolean)
 	const part = target.Part
 	const partCFrame = part.CFrame
 	const originalSize = part.Size
@@ -59,7 +79,7 @@ return function(target: Pick, anchor: Pick, extendPast: boolean?)
 		const axis = localAxis:Abs()
 		const currentExtent = size:Dot(axis)
 		const distance = math.clamp(
-			GetDistanceAlongAxis(target, anchor, direction, extendPast == true),
+			GetDistanceAlongAxis(target, anchor, direction, extendPast),
 			MINIMUM_PART_SIZE - currentExtent,
 			MAXIMUM_PART_SIZE - currentExtent
 		)
@@ -84,4 +104,57 @@ return function(target: Pick, anchor: Pick, extendPast: boolean?)
 			attachment.CFrame = part.CFrame:Inverse() * (partCFrame * originalCFrame)
 		end
 	end
+end
+
+-- Resizes a procedural model by its footprint.
+--
+-- There is nothing down in the geometry to resize: it is generated output, thrown away and rebuilt on every
+-- regeneration, so a part resize there would be undone the moment anything touched the model. The model's own
+-- Size is the footprint its generator fills, and growing that is what growing a procedural model means.
+--
+-- The element still describes the generated part that was under the cursor, so each axis it drives has to be
+-- carried into the model's own frame before the footprint can be changed along it. The arithmetic is otherwise
+-- the part's: grow by the full distance, move by half of it, and the far side of the model stays put.
+const function ResizeProcedural(target: Pick, anchor: Pick, extendPast: boolean)
+	const subject = target.Subject :: Model
+	const partCFrame = target.Part.CFrame
+	const pivot = subject:GetPivot()
+
+	local size = ModelHelper.GetSettableSize(subject) or Vector3.zero
+	local translation = Vector3.zero
+	const driven = { false, false, false }
+	for _, localAxis in target.Element.Axes do
+		const direction = partCFrame:VectorToWorldSpace(localAxis)
+
+		-- A corner drives all three axes of the part it was picked on, and on a generated part sitting at an
+		-- angle to the model two of those can round to the same model axis. The first one wins, rather than
+		-- both being applied and counting the same distance twice.
+		const axis = GeometryHelper.SnapToAxis(pivot:VectorToObjectSpace(direction)):Abs()
+		const axisIndex = GetAxisIndex(axis)
+		if driven[axisIndex] then
+			continue
+		end
+		driven[axisIndex] = true
+
+		const currentExtent = size:Dot(axis)
+		const distance = math.clamp(
+			GetDistanceAlongAxis(target, anchor, direction, extendPast),
+			MINIMUM_PROCEDURAL_SIZE - currentExtent,
+			MAXIMUM_PROCEDURAL_SIZE - currentExtent
+		)
+		size += axis * distance
+		translation += direction * (distance / 2)
+	end
+
+	ModelHelper.SetSize(subject, size)
+	subject:PivotTo(pivot + translation)
+end
+
+-- Resize To --
+return function(target: Pick, anchor: Pick, extendPast: boolean?)
+	if ModelHelper.IsProcedural(target.Subject) then
+		ResizeProcedural(target, anchor, extendPast == true)
+		return
+	end
+	ResizePart(target, anchor, extendPast == true)
 end

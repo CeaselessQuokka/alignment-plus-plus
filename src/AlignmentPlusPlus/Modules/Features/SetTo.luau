@@ -34,7 +34,9 @@ return function(target: Pick, anchor: Pick)
 		size = ModelHelper.GetSize(anchor.Subject)
 	end
 
-	if size then
+	-- A part owns its size, and so does a procedural model, whose footprint is what there is to set. An
+	-- ordinary model owns none, so for that the part that was picked takes it, as it always has.
+	if size and not ModelHelper.SetSize(target.Subject, size) then
 		target.Part.Size = size
 	end
 

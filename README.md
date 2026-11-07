@@ -21,6 +21,17 @@ Hope this plugin is at least a bit useful to your workflow :D
 
 Every mode except **Resize To** works on models as well as parts.
 
+### Procedural models
+
+Procedural models are treated as single objects, because that is what they are: the parts under them are
+generated output that the engine throws away and rebuilds whenever the model regenerates, so anything written
+to one of those parts would not survive. Every mode therefore acts on the model itself, and **Ctrl** does not
+reach past it to the generated parts the way it does with an ordinary model.
+
+**Resize To** does work on them, and is the one case where it works on something other than a part. A
+procedural model's size is the footprint its generator fills, so resizing one grows or shrinks that footprint
+and lets the generator lay out more or less of whatever it builds.
+
 ## Selecting
 
 Hover a part and the face under your cursor lights up, with a handle on each of its four edges and four
